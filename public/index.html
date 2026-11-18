@@ -162,13 +162,12 @@
         <form id="dispatchForm" class="stack" aria-label="New dispatch entry" novalidate>
 
           <!-- 1. TRACKING SLIP PHOTO (HOST OCR) -->
-          <div class="card">
+          <div class="card card-step step-1">
             <div class="card-head">
-              <div>
+              <div class="step-title-wrap">
+                <span class="step-badge" aria-hidden="true">1</span>
                 <h2 class="card-title">Tracking Slip</h2>
-                <p class="card-sub">Host extracts customer and tracking number automatically</p>
               </div>
-              <span id="ocrEngineBadge" class="meta-pill">Host OCR</span>
             </div>
 
             <div class="action-row">
@@ -185,10 +184,6 @@
                 Upload
               </label>
               <input type="file" id="trackingSlipFileInput" accept="image/*" class="sr-only" />
-
-              <button type="button" id="loadSampleSlipBtn" class="btn btn-subtle">
-                Sample Slip
-              </button>
             </div>
 
             <div id="trackingSlipPreviewContainer" class="slip-preview hidden">
@@ -213,15 +208,18 @@
             </div>
 
             <div id="trackingSlipEmptyState" class="empty-box">
-              Tap <strong>Take Photo</strong> or <strong>Sample Slip</strong> to scan a tracking label.
+              Tap <strong>Take Photo</strong> or <strong>Upload</strong> to scan a tracking label.
             </div>
           </div>
 
           <!-- 2. ORDER DETAILS WITH CERTAINTY METERS -->
-          <div class="card">
+          <div class="card card-step step-2">
             <div class="card-head">
               <div>
-                <h2 class="card-title">Order Details</h2>
+                <div class="step-title-wrap">
+                  <span class="step-badge" aria-hidden="true">2</span>
+                  <h2 class="card-title">Order Details</h2>
+                </div>
                 <p class="form-req-note">Fields marked <span aria-hidden="true">*</span> are required.</p>
               </div>
             </div>
@@ -229,7 +227,7 @@
             <div class="fields-stack">
               <div class="field-group">
                 <div class="label-row">
-                  <label for="orderNumberInput">Order Number <span class="optional-tag">(Optional)</span></label>
+                  <label for="orderNumberInput">Order Number</label>
                 </div>
                 <input
                   type="text"
@@ -316,19 +314,33 @@
           </div>
 
           <!-- 3. PRODUCTS & QUANTITY + 3x2 USER QUICK ACCESS GRID -->
-          <div class="card">
+          <div class="card card-step step-3">
             <div class="card-head">
-              <div>
+              <div class="step-title-wrap">
+                <span class="step-badge" aria-hidden="true">3</span>
                 <h2 class="card-title">Products &amp; Quantity</h2>
-                <p class="card-sub">Tap quick-access slots or search by name / SKU, then enter shelf/bay location</p>
               </div>
-              <span class="meta-pill">Total: <strong id="totalProductsQtyBadge">1</strong></span>
+              <button
+                type="button"
+                id="toggleEditQuickBtn"
+                class="edit-slots-circle"
+                aria-label="Edit Quick Access Slots"
+                title="Edit Quick Access Slots"
+              >
+                <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M12 20h9"/>
+                  <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                </svg>
+                <span id="editSlotsLabel">Edit</span>
+              </button>
             </div>
 
             <div class="quick-access-section">
               <div class="quick-access-header">
                 <span class="quick-access-label">Quick Access</span>
-                <button type="button" id="toggleEditQuickBtn" class="btn-link">Edit Slots</button>
+                <button type="button" id="syncProductsFromSheetBtn" class="btn btn-subtle btn-xs">
+                  Sync Catalog
+                </button>
               </div>
               <div id="quickAccessGrid" class="quick-access-grid"></div>
             </div>
@@ -336,22 +348,16 @@
             <hr class="hairline" />
 
             <div id="productRowsContainer" class="product-rows"></div>
-
-            <div class="row-between">
-              <button type="button" id="addProductRowBtn" class="btn btn-outline btn-sm">
-                + Add Product
-              </button>
-              <button type="button" id="syncProductsFromSheetBtn" class="btn btn-subtle btn-sm">
-                Sync Catalog
-              </button>
-            </div>
           </div>
 
           <!-- 4. PACKAGING PICTURES -->
-          <div class="card">
+          <div class="card card-step step-4">
             <div class="card-head">
               <div>
-                <h2 class="card-title">Packaging Pictures</h2>
+                <div class="step-title-wrap">
+                  <span class="step-badge" aria-hidden="true">4</span>
+                  <h2 class="card-title">Packaging Pictures</h2>
+                </div>
                 <p class="card-sub">Capture photos of packed items and parcel</p>
               </div>
               <span id="packagingCountBadge" class="meta-pill">0 photos</span>
@@ -381,7 +387,7 @@
           </div>
 
           <!-- OPTIONAL ORDER NUMBER / NAME SPELLING REMINDER (NON-BLOCKING) -->
-          <div id="orderCheckReminderNotice" class="order-check-reminder" role="status" aria-live="polite">
+          <div id="orderCheckReminderNotice" class="order-check-reminder hidden" role="status" aria-live="polite">
             <span class="order-check-icon" aria-hidden="true">i</span>
             <span><strong>Before saving:</strong> Add the <strong>Order Number</strong> if available, or double-check that the <strong>Customer Name</strong> is spelt correctly.</span>
           </div>

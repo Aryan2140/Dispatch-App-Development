@@ -196,6 +196,11 @@
     color: #ffffff;
     border-block-end: 2px solid var(--brand-gold);
     padding-block-start: env(safe-area-inset-top, 0px);
+    transition: box-shadow 180ms ease;
+  }
+
+  .app-header.is-scrolled {
+    box-shadow: 0 4px 14px color-mix(in oklab, var(--brand-navy) 28%, transparent);
   }
 
   .header-inner {
@@ -208,6 +213,11 @@
     justify-content: space-between;
     flex-wrap: wrap;
     gap: 0.5rem;
+    transition: padding-block 180ms ease;
+  }
+
+  .app-header.is-scrolled:not(:focus-within) .header-inner {
+    padding-block: 0.3125rem;
   }
 
   .brand-wrap {
@@ -224,6 +234,11 @@
     object-fit: contain;
     flex-shrink: 0;
     filter: drop-shadow(0 1px 3px color-mix(in oklab, #000000 35%, transparent));
+    transition: inline-size 180ms ease;
+  }
+
+  .app-header.is-scrolled:not(:focus-within) .header-logo-mark {
+    inline-size: 1.4375rem;
   }
 
   .brand-text {
@@ -276,6 +291,17 @@
     padding-inline: 0;
     justify-content: center;
     color: var(--brand-gold);
+    transition: background 150ms ease, scale 150ms ease, opacity 180ms ease, max-inline-size 180ms ease, min-inline-size 180ms ease;
+  }
+
+  .app-header.is-scrolled:not(:focus-within) .header-icon-btn {
+    opacity: 0;
+    max-inline-size: 0;
+    min-inline-size: 0;
+    padding: 0;
+    border-width: 0;
+    overflow: hidden;
+    pointer-events: none;
   }
 
   @media (pointer: coarse) {
@@ -283,6 +309,9 @@
     .header-icon-btn {
       min-block-size: var(--target-size);
       min-inline-size: var(--target-size);
+    }
+    .app-header.is-scrolled:not(:focus-within) .header-icon-btn {
+      min-inline-size: 0;
     }
   }
 
@@ -313,6 +342,17 @@
     margin-inline: auto;
     padding-block: 0 0.5625rem;
     padding-inline: 1rem;
+    max-block-size: 4.5rem;
+    overflow: hidden;
+    transition: max-block-size 200ms ease, opacity 160ms ease, padding-block 200ms ease, transform 200ms ease;
+  }
+
+  .app-header.is-scrolled:not(:focus-within) .nav-wrap {
+    max-block-size: 0;
+    opacity: 0;
+    padding-block: 0;
+    transform: translateY(-0.5rem);
+    pointer-events: none;
   }
 
   .segmented-tabs {
@@ -408,6 +448,81 @@
     border-radius: var(--radius);
     padding: 1rem;
     box-shadow: var(--shadow-card);
+    transition: border-color 150ms ease, box-shadow 150ms ease;
+  }
+
+  .card-step {
+    --step-color: var(--brand-navy);
+    --step-ink: #ffffff;
+    border-inline-start: 4px solid var(--step-color);
+  }
+
+  .card-step:focus-within {
+    border-color: var(--step-color);
+    box-shadow: 0 0 0 2px color-mix(in oklab, var(--step-color) 12%, transparent), var(--shadow-card);
+  }
+
+  .card-step.step-1 { --step-color: #001e34; --step-ink: #fdd400; }
+  .card-step.step-2 { --step-color: #eab308; --step-ink: #001e34; }
+  .card-step.step-3 { --step-color: #047857; --step-ink: #ffffff; }
+  .card-step.step-4 { --step-color: #1d4ed8; --step-ink: #ffffff; }
+
+  .step-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .step-badge {
+    display: inline-grid;
+    place-items: center;
+    inline-size: 1.5rem;
+    block-size: 1.5rem;
+    border-radius: 50%;
+    background: var(--step-color);
+    color: var(--step-ink);
+    font-size: 0.75rem;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
+
+  .edit-slots-circle {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.125rem;
+    inline-size: 3.25rem;
+    block-size: 3.25rem;
+    border-radius: 50%;
+    border: 1.5px solid var(--brand-navy);
+    background: var(--surface);
+    color: var(--brand-navy);
+    font-size: 0.65625rem;
+    font-weight: 700;
+    line-height: 1;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background 150ms ease, color 150ms ease, scale 120ms ease;
+  }
+
+  .edit-slots-circle .icon {
+    inline-size: 0.9375rem;
+    block-size: 0.9375rem;
+  }
+
+  .edit-slots-circle:hover {
+    background: var(--surface-muted);
+  }
+
+  .edit-slots-circle:active {
+    scale: 0.94;
+  }
+
+  .edit-slots-circle.active {
+    background: var(--brand-gold);
+    border-color: var(--brand-navy);
+    color: var(--brand-navy);
   }
 
   .card-head {
@@ -719,7 +834,7 @@
     margin-block-start: 0.75rem;
     padding-block: 1.125rem;
     padding-inline: 0.875rem;
-    border: 1px dashed var(--line-input);
+    border: 1px solid var(--line);
     border-radius: var(--radius-sm);
     background: var(--bg);
     text-align: center;
@@ -900,13 +1015,13 @@
   }
 
   .quick-slot-btn.empty {
-    border-style: dashed;
+    border: 1px solid var(--line);
     background: var(--bg);
     color: var(--ink-muted);
     align-items: center;
     justify-content: center;
     text-align: center;
-    font-size: 0.75rem;
+    font-size: 0.8125rem;
     font-weight: 600;
   }
 
@@ -916,7 +1031,7 @@
   }
 
   .quick-slot-name {
-    font-size: 0.75rem;
+    font-size: 0.875rem;
     font-weight: 700;
     line-height: 1.25;
     display: -webkit-box;
@@ -927,7 +1042,7 @@
   }
 
   .quick-slot-sku {
-    font-size: 0.65625rem;
+    font-size: 0.625rem;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     color: var(--ink-muted);
     white-space: nowrap;
@@ -1079,7 +1194,17 @@
 
   .remove-prod-btn {
     min-block-size: max(var(--target-size), 2.75rem);
-    min-inline-size: 2.5rem;
+    min-inline-size: 2.625rem;
+    background: var(--err-bg);
+    color: var(--err);
+    border-color: color-mix(in oklab, var(--err) 45%, transparent);
+    font-size: 1.125rem;
+    font-weight: 700;
+  }
+
+  .remove-prod-btn:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--err) 14%, var(--err-bg));
+    border-color: var(--err);
   }
 
   /* ==========================================================================

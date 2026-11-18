@@ -61,10 +61,8 @@
       'productsCountBadge',
       'dispatchAlertBanner',
       'dispatchForm',
-      'ocrEngineBadge',
       'trackingSlipCameraInput',
       'trackingSlipFileInput',
-      'loadSampleSlipBtn',
       'trackingSlipPreviewContainer',
       'trackingSlipPreviewImg',
       'rescanSlipBtn',
@@ -87,15 +85,15 @@
       'trackingCertaintyFill',
       'quickAccessGrid',
       'toggleEditQuickBtn',
-      'totalProductsQtyBadge',
+      'editSlotsLabel',
       'productRowsContainer',
-      'addProductRowBtn',
       'syncProductsFromSheetBtn',
       'packagingCountBadge',
       'packagingCameraInput',
       'packagingFileInput',
       'packagingGallery',
       'packagingEmptyState',
+      'orderCheckReminderNotice',
       'locationReminderNotice',
       'resetFormBtn',
       'submitDispatchBtn',
@@ -506,10 +504,9 @@
     els.customerNameInput.addEventListener('input', () => clearCertaintyMeter('name'));
     els.trackingNumberInput.addEventListener('input', () => clearCertaintyMeter('tracking'));
 
-    // Tracking Slip Capture & Sample
+    // Tracking Slip Capture
     els.trackingSlipCameraInput.addEventListener('change', handleTrackingSlipFileChange);
     els.trackingSlipFileInput.addEventListener('change', handleTrackingSlipFileChange);
-    els.loadSampleSlipBtn.addEventListener('click', handleLoadSampleSlip);
     els.rescanSlipBtn.addEventListener('click', () => {
       if (state.trackingSlipBase64) runHostOcr(state.trackingSlipBase64);
     });
@@ -521,15 +518,32 @@
     // Quick Access 3x2 Grid
     els.toggleEditQuickBtn.addEventListener('click', () => {
       state.editingQuickSlots = !state.editingQuickSlots;
-      els.toggleEditQuickBtn.textContent = state.editingQuickSlots ? 'Done Editing' : 'Edit Slots';
+      els.toggleEditQuickBtn.classList.toggle('active', state.editingQuickSlots);
+      if (els.editSlotsLabel) {
+        els.editSlotsLabel.textContent = state.editingQuickSlots ? 'Done' : 'Edit';
+      }
       renderQuickAccessGrid();
     });
     els.quickSlotSearchInput.addEventListener('input', renderQuickSlotModalList);
     els.clearQuickSlotBtn.addEventListener('click', () => assignQuickAccessSlot(null));
 
-    // Products
-    els.addProductRowBtn.addEventListener('click', () => addProductRow());
+    // Order Number reminder & Products
+    els.orderNumberInput?.addEventListener('input', updateOrderNumberReminder);
     els.syncProductsFromSheetBtn.addEventListener('click', () => loadProductsCatalog(true));
+
+    // Compact sticky header on scroll
+    const headerEl = document.querySelector('.app-header');
+    if (headerEl) {
+      window.addEventListener(
+        'scroll',
+        () => {
+          const y = window.scrollY || 0;
+          if (y > 24) headerEl.classList.add('is-scrolled');
+          else if (y <= 12) headerEl.classList.remove('is-scrolled');
+        },
+        { passive: true }
+      );
+    }
     els.refreshCatalogBtn.addEventListener('click', () => loadProductsCatalog(true));
     els.catalogSearchInput.addEventListener('input', renderCatalogTable);
     els.addProductForm.addEventListener('submit', handleAddProductToCatalog);
@@ -586,15 +600,17 @@
       els.openGoogleSheetLink.classList.add('hidden');
     }
 
-    const useGemini =
-      state.config.ocrMode === 'gemini' ||
-      (state.config.ocrMode === 'auto' && state.config.hasGeminiApiKey);
-    const plat = state.networkInfo?.platform;
-    els.ocrEngineBadge.textContent = useGemini
-      ? 'Host AI OCR'
-      : plat === 'win32'
-        ? 'Windows Host OCR'
-        : 'Host OCR';
+    if (els.ocrEngineBadge) {
+      const useGemini =
+        state.config.ocrMode === 'gemini' ||
+        (state.config.ocrMode === 'auto' && state.config.hasGeminiApiKey);
+      const plat = state.networkInfo?.platform;
+      els.ocrEngineBadge.textContent = useGemini
+        ? 'Host AI OCR'
+        : plat === 'win32'
+          ? 'Windows Host OCR'
+          : 'Host OCR';
+    }
   }
 
   // ==========================================================================
@@ -1088,6 +1104,13 @@
   // SEARCHABLE PRODUCT ROWS
   // ==========================================================================
 
+  function updateOrderNumberReminder() {
+    if (!els.orderCheckReminderNotice || !els.orderNumberInput) return;
+    const hasPackagingPhotos = state.packagingImagesBase64.length > 0;
+    const hasOrderNumber = els.orderNumberInput.value.trim().length > 0;
+    els.orderCheckReminderNotice.classList.toggle('hidden', !(hasPackagingPhotos && !hasOrderNumber));
+  }
+
   function updateLocationReminder() {
     if (!els.locationReminderNotice || !els.productRowsContainer) return;
     const hasPictures =
@@ -1135,7 +1158,7 @@
         <input
           type="text"
           class="product-location-input"
-          placeholder="Location (e.g. Bay A2)"
+          placeholder="Location"
           aria-label="Location product was taken from"
           value="${escapeHtml(initial.location || '')}"
           autocomplete="off"
@@ -1275,6 +1298,7 @@
   }
 
   function updateTotalProductQty() {
+    if (!els.totalProductsQtyBadge) return;
     let total = 0;
     els.productRowsContainer.querySelectorAll('.qty-input').forEach((inp) => {
       total += Math.max(0, parseInt(inp.value, 10) || 0);
@@ -1350,12 +1374,14 @@
       els.packagingEmptyState.classList.remove('hidden');
       els.packagingGallery.innerHTML = '';
       updateLocationReminder();
+      updateOrderNumberReminder();
       return;
     }
 
     els.packagingGallery.classList.remove('hidden');
     els.packagingEmptyState.classList.add('hidden');
     updateLocationReminder();
+    updateOrderNumberReminder();
 
     els.packagingGallery.innerHTML = state.packagingImagesBase64
       .map(
@@ -1501,6 +1527,7 @@
     state.packagingImagesBase64 = [];
     renderPackagingGallery();
     resetFormValidation(els.dispatchForm);
+    updateOrderNumberReminder();
     if (clearBanner) els.dispatchAlertBanner.classList.add('hidden');
   }
 
