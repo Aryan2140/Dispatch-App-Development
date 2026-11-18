@@ -119,67 +119,180 @@
       .toUpperCase()
       .replace(/[^A-Z0-9-]/g, '');
 
-    // CouriersPlease standard: CP + 5 alpha + 7 digits
-    const cpMatch = code.match(/^CP([A-Z01]{5})([0-9OI]{6,8})$/);
+    // CouriersPlease standard: CP + 5 alpha + 6-8 digits (e.g. CPCTOZE0000179)
+    const cpMatch = code.match(/^CP([A-Z0185]{5})([0-9OISBZ]{6,8})$/);
     if (cpMatch) {
-      const alphaPart = cpMatch[1].replace(/0/g, 'O').replace(/1/g, 'I');
-      const numPart = cpMatch[2].replace(/O/g, '0').replace(/I/g, '1');
-      code = 'CP' + alphaPart + numPart;
+      const alphaPart = cpMatch[1]
+        .replace(/0/g, 'O')
+        .replace(/1/g, 'I')
+        .replace(/8/g, 'B')
+        .replace(/5/g, 'S');
+      const numPart = cpMatch[2]
+        .replace(/O/g, '0')
+        .replace(/I/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2');
+      return 'CP' + alphaPart + numPart;
     }
+
+    // Australia Post eParcel / Article ID / Con No: 2 digits + 2-3 letters + 7-20 digits
+    // (e.g. 39BCX500052901000931505, 33PKH509928101000930904, 39BCX5000529)
+    const apMatch = code.match(/^([0-9OISBZ]{2})([A-Z0185]{3})([0-9OISBZ]{7,20})$/);
+    if (apMatch) {
+      const leadDigits = apMatch[1]
+        .replace(/O/g, '0')
+        .replace(/I/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2');
+      const midAlpha = apMatch[2]
+        .replace(/0/g, 'O')
+        .replace(/1/g, 'I')
+        .replace(/8/g, 'B')
+        .replace(/5/g, 'S');
+      const tailDigits = apMatch[3]
+        .replace(/O/g, '0')
+        .replace(/I/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2');
+      return leadDigits + midAlpha + tailDigits;
+    }
+
     return code;
+  }
+
+  function extractCodeCandidate(fragment) {
+    if (!fragment) return '';
+    // Stop before trailing short numeric footer codes (e.g. "1118") or trailing noise words
+    let cleaned = String(fragment)
+      .trim()
+      .replace(/^(?:[:;#.\-=|\s])+/, '')
+      .replace(/\s+(?:item|parcel|weight|cube|page)\b.*$/i, '')
+      .replace(/\s+\d{1,5}(?:\s+.*)?$/, '')
+      .trim();
+
+    // Check first continuous or space-split alphanumeric sequence (at least 7 chars)
+    const m = cleaned.match(/^([A-Z0-9][A-Z0-9-]{5,32}(?:\s+[0-9OISBZ]{5,18})?)/i);
+    if (!m || !m[1]) return '';
+    return normalizeTrackingCode(m[1].replace(/\s+/g, ''));
+  }
+
+  function isFalseTrackingToken(code) {
+    if (!code || code.length < 7) return true;
+    if (/^(?:PARCEL|EXPRESS|GRAM|WEIGHT|NUMBER|ARTICLE|CONNOTE|SENDER|DELIVER|SHIPPING)$/i.test(code)) return true;
+    // Ignore AU mobile/landline phone numbers mistaken as tracking
+    if (/^(?:614\d{8}|04\d{8}|61[2378]\d{8})$/.test(code)) return true;
+    return false;
   }
 
   /**
    * Extracts Connote / Tracking Number + certainty score.
    */
   function extractTrackingNumber(rawText, lines) {
-    // 1. High-priority explicit labels (AP Article Id, Connote, Tracking, Consignment, Con No, Label No, AWB)
-    const explicitPatterns = [
-      /(?:ap\s*article\s*id|article\s*id|c[o0]nn[o0]te|consignment(?:\s*no|\s*#)?|tracking(?:\s*no|\s*#|\s*id|\s*number)?|label\s*no|awb)\s*[:;#.-]?\s*([A-Z0-9-]{8,30})/i,
-      /\bcon\s*no\.?\s*[:;#.-]?\s*([A-Z0-9-]{7,24})/i
+    // Ordered by specificity: explicit ID headers > short Con No > decoded barcode payload
+    const headerRules = [
+      {
+        priority: 5,
+        labelOnlyRe: /^(?:ap\s*)?art[i1l]c[l1i]e\s*[i1l1]?d\s*[:;#.-]*$/i,
+        inlineRe: /(?:(?:ap|tap)\s*)?art[i1l]c[l1i]e\s*[i1l1]?d\s*[:;#.-]*\s+([A-Z0-9][A-Z0-9 -]{6,34})/i
+      },
+      {
+        priority: 4,
+        labelOnlyRe: /^(?:c[o0]nn[o0l1mt]{2,4}e?|consignment(?:\s*n[o0]|\s*#)?|track[i1l]ng(?:\s*n[o0]|\s*#|\s*[i1l]d|\s*number)?|label\s*n[o0]|awb)\s*[:;#.-]*$/i,
+        inlineRe: /(?:c[o0]nn[o0l1mt]{2,4}e?|c[o0]ns[i1l]gnment(?:\s*n[o0]|\s*#)?|track[i1l]ng(?:\s*n[o0]|\s*#|\s*[i1l]d|\s*number)?|label\s*n[o0]|awb)\s*[:;#.-]*\s+([A-Z0-9][A-Z0-9 -]{6,34})/i
+      },
+      {
+        priority: 2,
+        labelOnlyRe: /^c[o0]n\s*n[o0]\.?\s*[:;#.-]*$/i,
+        inlineRe: /\bc[o0]n\s*n[o0]\.?\s*[:;#.-]*\s+([A-Z0-9][A-Z0-9-]{6,24})/i
+      },
+      {
+        priority: 1,
+        labelOnlyRe: null,
+        inlineRe: /^BARCODE_PAYLOAD\s*:\s*([A-Z0-9-]{7,32})/i
+      }
     ];
 
     const candidates = [];
 
-    for (const line of lines) {
-      for (let pIdx = 0; pIdx < explicitPatterns.length; pIdx++) {
-        const m = line.match(explicitPatterns[pIdx]);
-        if (m && m[1]) {
-          const code = normalizeTrackingCode(m[1]);
-          if (code.length >= 7 && !/^(PARCEL|EXPRESS|GRAM|WEIGHT|NUMBER|ITEM)$/i.test(code)) {
-            candidates.push({ code, explicit: true, priority: pIdx === 0 ? 2 : 1 });
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      for (const rule of headerRules) {
+        const inlineMatch = line.match(rule.inlineRe);
+        if (inlineMatch && inlineMatch[1]) {
+          const code = rule.priority === 1
+            ? normalizeTrackingCode(inlineMatch[1])
+            : extractCodeCandidate(inlineMatch[1]);
+          if (!isFalseTrackingToken(code) && /\d/.test(code)) {
+            candidates.push({ code, priority: rule.priority, explicit: rule.priority > 1 });
+          }
+          continue;
+        }
+        if (rule.labelOnlyRe && rule.labelOnlyRe.test(line) && i + 1 < lines.length) {
+          const nextCode = extractCodeCandidate(lines[i + 1]);
+          if (!isFalseTrackingToken(nextCode) && /\d/.test(nextCode)) {
+            candidates.push({ code: nextCode, priority: rule.priority, explicit: true });
           }
         }
       }
     }
 
     if (candidates.length > 0) {
-      // Prefer longer explicit tracking ID (e.g. AusPost AP Article Id over shorter Con No, or Connote over short)
+      // Highest priority first, then longest code (e.g. full AP Article Id over short Con No)
       candidates.sort((a, b) => (b.priority - a.priority) || (b.code.length - a.code.length));
       const best = candidates[0];
-      const hasDigit = /\d/.test(best.code);
-      const formatScore = hasDigit && best.code.length >= 10 ? 92 : hasDigit ? 82 : 55;
-      return { trackingNumber: best.code, baseCertainty: formatScore };
+      const hasAlphaAndDigit = /[A-Z]/.test(best.code) && /\d/.test(best.code);
+      const baseCertainty = best.explicit
+        ? (hasAlphaAndDigit && best.code.length >= 10 ? 95 : 86)
+        : 84;
+      return { trackingNumber: best.code, baseCertainty };
     }
 
-    // 2. CouriersPlease pattern anywhere
-    const cpMatches = rawText.match(/\b(CP[A-Z01]{4,6}[0-9OI]{5,9})\b/gi);
+    // 2. Carrier-specific patterns anywhere in text (handles obscured header labels in shadow)
+    const normalizedAll = rawText.toUpperCase();
+
+    // 2a. Australia Post Article ID / eParcel Con No (2 digits + 3 letters + 7-20 digits)
+    const apMatches = [];
+    const apRe = /\b([0-9OISBZ]{2}[A-Z0185]{3}[0-9OISBZ]{7,20})\b/gi;
+    let m;
+    while ((m = apRe.exec(normalizedAll)) !== null) {
+      const norm = normalizeTrackingCode(m[1]);
+      if (!isFalseTrackingToken(norm) && /^[0-9]{2}[A-Z]{3}[0-9]{7,20}$/.test(norm)) {
+        apMatches.push(norm);
+      }
+    }
+    if (apMatches.length > 0) {
+      apMatches.sort((a, b) => b.length - a.length);
+      return {
+        trackingNumber: apMatches[0],
+        baseCertainty: apMatches[0].length >= 16 ? 92 : 86
+      };
+    }
+
+    // 2b. CouriersPlease standard pattern anywhere (CP + 5 letters + 6-8 digits)
+    const cpMatches = normalizedAll.match(/\b(CP[A-Z0185]{5}[0-9OISBZ]{6,8})\b/gi);
     if (cpMatches && cpMatches.length > 0) {
       return {
         trackingNumber: normalizeTrackingCode(cpMatches[0]),
-        baseCertainty: 78
+        baseCertainty: 90
       };
     }
 
     // 3. Standalone alphanumeric tracking / barcode token
     for (const line of lines) {
-      const m = line.match(/\b([A-Z0-9]{2,5}[0-9]{6,18}[A-Z0-9]*)\b/i);
-      if (m) {
-        const code = normalizeTrackingCode(m[1]);
-        if (code.length >= 10) return { trackingNumber: code, baseCertainty: 68 };
+      if (SENDER_KEYWORDS.some((k) => k.test(line))) continue;
+      if (NON_NAME_LINE_PATTERNS.slice(0, 3).some((k) => k.test(line))) continue;
+      const alnum = line.match(/\b([A-Z]{2,5}[0-9]{6,18}[A-Z0-9]*|\d{2}[A-Z]{2,4}\d{7,18})\b/i);
+      if (alnum) {
+        const code = normalizeTrackingCode(alnum[1]);
+        if (!isFalseTrackingToken(code)) return { trackingNumber: code, baseCertainty: 72 };
       }
       const numBarcode = line.match(/\b(\d{12,24})\b/);
-      if (numBarcode) return { trackingNumber: numBarcode[1], baseCertainty: 62 };
+      if (numBarcode && !isFalseTrackingToken(numBarcode[1])) {
+        return { trackingNumber: numBarcode[1], baseCertainty: 64 };
+      }
     }
 
     return { trackingNumber: '', baseCertainty: 0 };

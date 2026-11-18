@@ -254,13 +254,20 @@ function buildDailySummary(dateStr) {
   const dispatches = readJsonFile(DISPATCHES_FILE, []);
   const productMap = new Map();
   const staffMap = new Map();
+  const entries = [];
   let totalOrders = 0;
   let totalUnits = 0;
 
   for (const d of dispatches) {
     let loggedDate = '';
+    let loggedTime = '';
     if (d.createdAtIso) {
-      loggedDate = getSydneyDateAndTime(new Date(d.createdAtIso)).dateStr;
+      const syd = getSydneyDateAndTime(new Date(d.createdAtIso));
+      loggedDate = syd.dateStr;
+      loggedTime = syd.timeStr;
+    } else if (d.timestamp) {
+      const tm = String(d.timestamp).match(/\b(\d{2}:\d{2})/);
+      if (tm) loggedTime = tm[1];
     }
     const orderDate = String(d.orderDate || '').slice(0, 10);
     if (loggedDate !== dateStr && orderDate !== dateStr) continue;
@@ -278,26 +285,52 @@ function buildDailySummary(dateStr) {
       const qty = Math.max(0, Number(p.quantity) || 0);
       const sku = String(p.sku || '').trim();
       const name = String(p.name || '').trim();
+      const location = String(p.location || '').trim();
       if (!name || !qty) continue;
 
       totalUnits += qty;
       staffRec.units += qty;
 
+      entries.push({
+        time: loggedTime || '-',
+        sortKey: d.createdAtIso || `${orderDate}T${loggedTime || '00:00'}:00`,
+        sku,
+        name,
+        quantity: qty,
+        location: location || '-',
+        staffName: staff,
+        dispatchId: d.dispatchId || '',
+        trackingNumber: d.trackingNumber || d.connote || ''
+      });
+
       const key = `${sku.toLowerCase()}::${name.toLowerCase()}`;
       if (!productMap.has(key)) {
-        productMap.set(key, { sku, name, quantity: 0 });
+        productMap.set(key, { sku, name, quantity: 0, locations: new Set() });
       }
-      productMap.get(key).quantity += qty;
+      const agg = productMap.get(key);
+      agg.quantity += qty;
+      if (location) agg.locations.add(location);
     }
   }
 
-  const products = Array.from(productMap.values()).sort((a, b) => b.quantity - a.quantity);
+  entries.sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
+  const cleanEntries = entries.map(({ sortKey, ...rest }) => rest);
+
+  const products = Array.from(productMap.values())
+    .map((p) => ({
+      sku: p.sku,
+      name: p.name,
+      quantity: p.quantity,
+      location: Array.from(p.locations).join(', ') || '-'
+    }))
+    .sort((a, b) => b.quantity - a.quantity);
   const byStaff = Array.from(staffMap.values()).sort((a, b) => b.units - a.units);
 
   return {
     date: dateStr,
     totalOrders,
     totalUnits,
+    entries: cleanEntries,
     products,
     byStaff
   };
@@ -474,7 +507,7 @@ function runMacOcrOnFile(imgPath) {
   if (!fs.existsSync(binPath)) return Promise.resolve(null);
 
   return new Promise((resolve) => {
-    execFile(binPath, [imgPath], { timeout: 8000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
+    execFile(binPath, [imgPath], { timeout: 12000, maxBuffer: 1024 * 1024 }, (err, stdout) => {
       if (err || !stdout || !stdout.trim()) {
         return resolve(null);
       }
@@ -647,7 +680,14 @@ async function processImageOcrOnHost(imageBase64, config) {
     }
 
     let extracted = rawText ? labelParser.parseTrackingSlipText(rawText, 90) : null;
-    if (!rawText || (!extracted.customerName && !extracted.trackingNumber)) {
+    const needsFallback =
+      !rawText ||
+      !extracted.customerName ||
+      !extracted.trackingNumber ||
+      (extracted.customerNameCertainty || 0) < 78 ||
+      (extracted.trackingNumberCertainty || 0) < 78;
+
+    if (needsFallback) {
       const tessRes = await runHostTesseractOnFile(tmpImgPath);
       if (tessRes && tessRes.text) {
         const tessExtracted = labelParser.parseTrackingSlipText(tessRes.text, tessRes.confidence);
@@ -656,15 +696,22 @@ async function processImageOcrOnHost(imageBase64, config) {
           rawText = tessRes.text;
           engine = 'host-tesseract';
         } else {
+          const pickTessName =
+            (!extracted.customerName && Boolean(tessExtracted.customerName)) ||
+            ((tessExtracted.customerNameCertainty || 0) > (extracted.customerNameCertainty || 0));
+          const pickTessTrack =
+            (!extracted.trackingNumber && Boolean(tessExtracted.trackingNumber)) ||
+            ((tessExtracted.trackingNumberCertainty || 0) > (extracted.trackingNumberCertainty || 0));
+
           extracted = {
-            customerName: extracted.customerName || tessExtracted.customerName,
-            customerNameCertainty: extracted.customerName
-              ? extracted.customerNameCertainty
-              : tessExtracted.customerNameCertainty,
-            trackingNumber: extracted.trackingNumber || tessExtracted.trackingNumber,
-            trackingNumberCertainty: extracted.trackingNumber
-              ? extracted.trackingNumberCertainty
-              : tessExtracted.trackingNumberCertainty,
+            customerName: pickTessName ? tessExtracted.customerName : extracted.customerName,
+            customerNameCertainty: pickTessName
+              ? tessExtracted.customerNameCertainty
+              : extracted.customerNameCertainty,
+            trackingNumber: pickTessTrack ? tessExtracted.trackingNumber : extracted.trackingNumber,
+            trackingNumberCertainty: pickTessTrack
+              ? tessExtracted.trackingNumberCertainty
+              : extracted.trackingNumberCertainty,
             orderDate: extracted.orderDate || tessExtracted.orderDate
           };
           engine = `${engine}+tesseract`;
@@ -1211,7 +1258,7 @@ async function handleRequest(req, res) {
         if (syncFilter && (d.syncStatus || '').toLowerCase() !== syncFilter) return false;
         if (!q) return true;
         const productNames = Array.isArray(d.products)
-          ? d.products.map((p) => `${p.sku || ''} ${p.name || ''}`).join(' ')
+          ? d.products.map((p) => `${p.sku || ''} ${p.name || ''} ${p.location || ''}`).join(' ')
           : '';
         const haystack = [
           d.dispatchId,
@@ -1259,7 +1306,9 @@ async function handleRequest(req, res) {
       const rows = [csvHeaders.map(escapeCsv).join(',')];
       for (const d of dispatches) {
         const prodSummary = Array.isArray(d.products)
-          ? d.products.map((p) => `${p.quantity}x ${p.sku ? '[' + p.sku + '] ' : ''}${p.name}`).join('; ')
+          ? d.products
+              .map((p) => `${p.quantity}x ${p.sku ? '[' + p.sku + '] ' : ''}${p.name}${p.location ? ' (Loc: ' + p.location + ')' : ''}`)
+              .join('; ')
           : '';
         rows.push(
           [
@@ -1310,7 +1359,8 @@ async function handleRequest(req, res) {
             .map((p) => ({
               sku: String(p.sku || '').trim(),
               name: String(p.name || '').trim(),
-              quantity: Math.max(1, Number(p.quantity) || 1)
+              quantity: Math.max(1, Number(p.quantity) || 1),
+              location: String(p.location || '').trim()
             }))
         : [];
 

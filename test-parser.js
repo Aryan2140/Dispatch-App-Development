@@ -91,4 +91,44 @@ assert.strictEqual(res5.trackingNumber, '39BCX500052901000931505');
 assert.ok(res5.customerNameCertainty >= 75);
 assert.ok(res5.trackingNumberCertainty >= 75);
 
+// Test 6: OCR-corrupted "AP Article ld" + split-line + spaces + obscured headers
+const trickyAusPost = `
+Australia Post eParcel
+DELIVER TO
+Jamie Tan
+12 High Street
+SYDNEY NSW 2000
+AP Article ld: 39BCX5000529 01000931505 1118
+`;
+const res6 = parser.parseTrackingSlipText(trickyAusPost, 78);
+console.log('Test 6 (Corrupted header + spaced ID + footer 1118):', res6);
+assert.strictEqual(res6.trackingNumber, '39BCX500052901000931505');
+
+// Test 7: Split-line "Connote:" header and darkened label prefix
+const splitLineCp = `
+CouriersPlease
+Connote:
+CPCT0ZE0000179
+To: Priya Patel
+44 Station Rd
+AUBURN NSW 2144
+`;
+const res7 = parser.parseTrackingSlipText(splitLineCp, 88);
+console.log('Test 7 (Split-line Connote):', res7);
+assert.strictEqual(res7.trackingNumber, 'CPCTOZE0000179');
+assert.strictEqual(res7.customerName, 'Priya Patel');
+
+// Test 8: Missing header label completely (carrier pattern rescue)
+const headlessAusPost = `
+Australia Post
+DELIVER TO
+Liam Chen
+88 Pitt St
+SYDNEY NSW 2000
+398CX500052901000931505
+`;
+const res8 = parser.parseTrackingSlipText(headlessAusPost, 85);
+console.log('Test 8 (Obscured header pattern rescue):', res8);
+assert.strictEqual(res8.trackingNumber, '39BCX500052901000931505');
+
 console.log('\nAll parser tests passed!');

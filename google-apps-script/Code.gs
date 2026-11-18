@@ -307,7 +307,8 @@ function doPost(e) {
         const q = Number(p.quantity) || 1;
         totalQty += q;
         const skuPart = p.sku ? `[${p.sku}] ` : '';
-        return `${q}x ${skuPart}${p.name}`;
+        const locPart = p.location ? ` (Loc: ${String(p.location).trim()})` : '';
+        return `${q}x ${skuPart}${p.name}${locPart}`;
       });
       const productsSummary = productLines.join('\n');
 
@@ -438,19 +439,24 @@ function doPost(e) {
 function aggregateDayFromSheet_(ss, dateStr) {
   const sheet = ss.getSheetByName(CONFIG.DISPATCH_SHEET_NAME);
   if (!sheet || sheet.getLastRow() < 2) {
-    return { date: dateStr, totalOrders: 0, totalUnits: 0, products: [], byStaff: [] };
+    return { date: dateStr, totalOrders: 0, totalUnits: 0, entries: [], products: [], byStaff: [] };
   }
 
   const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 14).getDisplayValues();
   const productMap = {};
   const staffMap = {};
+  const entries = [];
   let totalOrders = 0;
   let totalUnits = 0;
 
   values.forEach((r) => {
-    const loggedDate = String(r[1] || '').slice(0, 10);
+    const loggedFull = String(r[1] || '').trim();
+    const loggedDate = loggedFull.slice(0, 10);
     const orderDate = String(r[2] || '').slice(0, 10);
     if (loggedDate !== dateStr && orderDate !== dateStr) return;
+
+    const timeMatch = loggedFull.match(/\b(\d{2}:\d{2})/);
+    const loggedTime = timeMatch ? timeMatch[1] : '-';
 
     totalOrders++;
     const staff = String(r[7] || 'Unknown').trim() || 'Unknown';
@@ -466,26 +472,44 @@ function aggregateDayFromSheet_(ss, dateStr) {
       const qty = Math.max(0, Number(p.quantity) || 0);
       const sku = String(p.sku || '').trim();
       const name = String(p.name || '').trim();
+      const location = String(p.location || '').trim();
       if (!name || !qty) return;
 
       totalUnits += qty;
       staffMap[staff].units += qty;
 
+      entries.push({
+        time: loggedTime,
+        sku: sku,
+        name: name,
+        quantity: qty,
+        location: location || '-'
+      });
+
       const key = (sku + '::' + name).toLowerCase();
       if (!productMap[key]) {
-        productMap[key] = { sku: sku, name: name, quantity: 0 };
+        productMap[key] = { sku: sku, name: name, quantity: 0, locations: {} };
       }
       productMap[key].quantity += qty;
+      if (location) productMap[key].locations[location] = true;
     });
   });
 
-  const products = Object.values(productMap).sort((a, b) => b.quantity - a.quantity);
+  const products = Object.values(productMap)
+    .map((p) => ({
+      sku: p.sku,
+      name: p.name,
+      quantity: p.quantity,
+      location: Object.keys(p.locations).join(', ') || '-'
+    }))
+    .sort((a, b) => b.quantity - a.quantity);
   const byStaff = Object.values(staffMap).sort((a, b) => b.units - a.units);
 
   return {
     date: dateStr,
     totalOrders: totalOrders,
     totalUnits: totalUnits,
+    entries: entries,
     products: products,
     byStaff: byStaff
   };
@@ -496,6 +520,15 @@ function aggregateDayFromSheet_(ss, dateStr) {
  */
 function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
   const products = Array.isArray(summary.products) ? summary.products : [];
+  const entries = (Array.isArray(summary.entries) && summary.entries.length > 0)
+    ? summary.entries
+    : products.map((p) => ({
+        time: p.time || '-',
+        sku: p.sku || '',
+        name: p.name || '',
+        quantity: p.quantity || 0,
+        location: p.location || '-'
+      }));
   const byStaff = Array.isArray(summary.byStaff) ? summary.byStaff : [];
   const totalOrders = summary.totalOrders || 0;
   const totalUnits = summary.totalUnits || 0;
@@ -507,14 +540,15 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
     `Total Orders: ${totalOrders}`,
     `Total Units Packaged: ${totalUnits}`,
     '',
-    'PRODUCTS PACKAGED:'
+    'PRODUCTS PACKAGED (Time | Product | Quantity | Location):'
   ];
 
-  if (products.length === 0) {
+  if (entries.length === 0) {
     plainLines.push('  No products packaged today.');
   } else {
-    products.forEach((p) => {
-      plainLines.push(`  - ${p.quantity}x ${p.sku ? '[' + p.sku + '] ' : ''}${p.name}`);
+    entries.forEach((e) => {
+      const skuPart = e.sku ? `[${e.sku}] ` : '';
+      plainLines.push(`  - ${e.time || '-'} | ${skuPart}${e.name} | Qty: ${e.quantity} | Location: ${e.location || '-'}`);
     });
   }
 
@@ -529,13 +563,17 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
     plainLines.push('', `Google Sheet: ${sheetUrl}`);
   }
 
-  const productRowsHtml = products.length === 0
-    ? '<tr><td colspan="3" style="padding:12px;color:#64748b;text-align:center;">No products packaged today.</td></tr>'
-    : products.map((p) => `
+  const tableRowsHtml = entries.length === 0
+    ? '<tr><td colspan="4" style="padding:12px;color:#64748b;text-align:center;">No products packaged today.</td></tr>'
+    : entries.map((e) => `
       <tr>
-        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;font-family:monospace;color:#334155;">${escapeHtml_(p.sku || '-')}</td>
-        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;color:#001e34;font-weight:600;">${escapeHtml_(p.name)}</td>
-        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;color:#001e34;">${p.quantity}</td>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;font-family:monospace;color:#334155;white-space:nowrap;">${escapeHtml_(e.time || '-')}</td>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;color:#001e34;">
+          <div style="font-weight:600;">${escapeHtml_(e.name)}</div>
+          ${e.sku ? `<div style="font-size:11px;font-family:monospace;color:#64748b;">${escapeHtml_(e.sku)}</div>` : ''}
+        </td>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;color:#001e34;">${e.quantity}</td>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;color:#334155;">${escapeHtml_(e.location || '-')}</td>
       </tr>
     `).join('');
 
@@ -548,7 +586,7 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
   `).join('');
 
   const htmlBody = `
-    <div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
+    <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
       <div style="background:#001e34;color:#ffffff;padding:18px 22px;border-bottom:3px solid #fdd400;">
         <div style="font-size:12px;letter-spacing:2px;color:#fdd400;font-weight:bold;">AIMEX AUSTRALIA</div>
         <h2 style="margin:4px 0 0;font-size:19px;">Daily Dispatch Summary — ${escapeHtml_(dateStr)}</h2>
@@ -563,12 +601,13 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
         <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
           <thead>
             <tr style="background:#f1f5f9;color:#475569;text-align:left;">
-              <th style="padding:8px 12px;">SKU</th>
+              <th style="padding:8px 12px;">Time</th>
               <th style="padding:8px 12px;">Product</th>
-              <th style="padding:8px 12px;text-align:right;">Qty</th>
+              <th style="padding:8px 12px;text-align:right;">Quantity</th>
+              <th style="padding:8px 12px;">Location</th>
             </tr>
           </thead>
-          <tbody>${productRowsHtml}</tbody>
+          <tbody>${tableRowsHtml}</tbody>
         </table>
 
         ${byStaff.length > 0 ? `

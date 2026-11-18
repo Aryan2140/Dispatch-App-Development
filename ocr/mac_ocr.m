@@ -9,17 +9,20 @@ int main(int argc, const char * argv[]) {
         NSString *path = [NSString stringWithUTF8String:argv[1]];
         NSURL *url = [NSURL fileURLWithPath:path];
         VNImageRequestHandler *handler = [[VNImageRequestHandler alloc] initWithURL:url options:@{}];
-        VNRecognizeTextRequest *req = [[VNRecognizeTextRequest alloc] init];
-        req.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
-        req.usesLanguageCorrection = NO;
+
+        VNRecognizeTextRequest *textReq = [[VNRecognizeTextRequest alloc] init];
+        textReq.recognitionLevel = VNRequestTextRecognitionLevelAccurate;
+        textReq.usesLanguageCorrection = NO;
+
+        VNDetectBarcodesRequest *barcodeReq = [[VNDetectBarcodesRequest alloc] init];
 
         NSError *err = nil;
-        BOOL ok = [handler performRequests:@[req] error:&err];
+        BOOL ok = [handler performRequests:@[textReq, barcodeReq] error:&err];
         if (!ok || err) {
             return 2;
         }
 
-        NSArray<VNRecognizedTextObservation *> *results = req.results;
+        NSArray<VNRecognizedTextObservation *> *results = textReq.results;
         NSArray<VNRecognizedTextObservation *> *sorted = [results sortedArrayUsingComparator:^NSComparisonResult(VNRecognizedTextObservation *a, VNRecognizedTextObservation *b) {
             CGFloat ay = CGRectGetMidY(a.boundingBox);
             CGFloat by = CGRectGetMidY(b.boundingBox);
@@ -52,6 +55,16 @@ int main(int argc, const char * argv[]) {
 
         for (NSString *line in lines) {
             printf("%s\n", [line UTF8String]);
+        }
+
+        for (VNBarcodeObservation *bObs in barcodeReq.results) {
+            NSString *payload = bObs.payloadStringValue;
+            if (!payload || payload.length < 7) continue;
+            NSString *cleaned = [[payload componentsSeparatedByCharactersInSet:[NSCharacterSet controlCharacterSet]] componentsJoinedByString:@""];
+            cleaned = [cleaned stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+            if (cleaned.length >= 7 && cleaned.length <= 40 && [cleaned rangeOfString:@" "].location == NSNotFound) {
+                printf("BARCODE_PAYLOAD: %s\n", [cleaned UTF8String]);
+            }
         }
     }
     return 0;

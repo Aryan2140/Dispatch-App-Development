@@ -302,7 +302,7 @@
             <div class="card-head">
               <div>
                 <h2 class="card-title">Products &amp; Quantity</h2>
-                <p class="card-sub">Tap quick-access slots or search by name / SKU</p>
+                <p class="card-sub">Tap quick-access slots or search by name / SKU, then enter shelf/bay location</p>
               </div>
               <span class="meta-pill">Total: <strong id="totalProductsQtyBadge">1</strong></span>
             </div>
@@ -360,6 +360,12 @@
             <div id="packagingEmptyState" class="empty-box">
               No packaging photos added yet.
             </div>
+          </div>
+
+          <!-- OPTIONAL LOCATION REMINDER (NON-BLOCKING) -->
+          <div id="locationReminderNotice" class="location-reminder hidden" role="status" aria-live="polite">
+            <span class="location-reminder-icon" role="img" aria-label="Reminder">!</span>
+            <span><strong>Check product location:</strong> Pictures are attached, but one or more products are missing a pick location. Double-check if a location needs to be added.</span>
           </div>
 
           <!-- SUBMIT BAR -->

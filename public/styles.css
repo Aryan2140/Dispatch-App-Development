@@ -956,21 +956,25 @@
 
   .product-row {
     display: grid;
-    grid-template-columns: 1fr auto auto;
+    grid-template-columns: minmax(10rem, 1.35fr) minmax(7rem, 0.85fr) auto auto;
     gap: 0.5rem;
     align-items: start;
   }
 
-  @container card (inline-size < 420px) {
+  @container card (inline-size < 520px) {
     .product-row {
-      grid-template-columns: 1fr auto;
+      grid-template-columns: minmax(0, 1.3fr) minmax(0, 0.9fr);
     }
-    .product-search-wrap {
-      grid-column: 1 / -1;
+    .qty-stepper {
+      justify-self: start;
+    }
+    .remove-prod-btn {
+      justify-self: end;
     }
   }
 
-  .product-search-wrap {
+  .product-search-wrap,
+  .product-location-wrap {
     position: relative;
     min-inline-size: 0;
   }
@@ -1117,6 +1121,34 @@
   /* ==========================================================================
    * SUBMIT BAR & BANNERS
    * ========================================================================== */
+
+  .location-reminder {
+    padding-block: 0.625rem;
+    padding-inline: 0.75rem;
+    border-radius: var(--radius-sm);
+    background: var(--err-bg);
+    border: 1px solid color-mix(in oklab, var(--err) 35%, transparent);
+    color: var(--err);
+    font-size: 0.8125rem;
+    font-weight: 500;
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .location-reminder-icon {
+    display: inline-grid;
+    place-items: center;
+    inline-size: 1.125rem;
+    block-size: 1.125rem;
+    margin-block-start: 0.1rem;
+    border-radius: 50%;
+    background: var(--err);
+    color: #ffffff;
+    font-size: 0.75rem;
+    font-weight: 800;
+    flex-shrink: 0;
+  }
 
   .submit-bar {
     display: flex;

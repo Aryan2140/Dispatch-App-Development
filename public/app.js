@@ -3,7 +3,7 @@
  * AIMEX DISPATCH — MOBILE-FIRST CLIENT CONTROLLER
  * ============================================================================
  * Standardized Image Specs:
- *   - Tracking Slip: 1152px max edge, 0.72 JPEG (~90-160 KB, crisp OCR)
+ *   - Tracking Slip: 1400px max edge, 0.82 JPEG (~120-210 KB, crisp barcode/text OCR)
  *   - Packaging:     960px max edge, 0.68 JPEG (~65-110 KB, fast upload)
  * All OCR runs on the host computer (POST /api/ocr).
  */
@@ -11,7 +11,7 @@
 (function () {
   const STAFF_STORAGE_KEY = 'aimex_staff_name';
 
-  const SLIP_IMAGE_SPEC = { maxDim: 1152, quality: 0.72 };
+  const SLIP_IMAGE_SPEC = { maxDim: 1400, quality: 0.82 };
   const PACKAGING_IMAGE_SPEC = { maxDim: 960, quality: 0.68 };
 
   const DEFAULT_QUICK_ACCESS = [
@@ -95,6 +95,7 @@
       'packagingFileInput',
       'packagingGallery',
       'packagingEmptyState',
+      'locationReminderNotice',
       'resetFormBtn',
       'submitDispatchBtn',
       'historySearchInput',
@@ -633,8 +634,8 @@
   }
 
   /**
-   * Neutralizes uneven diagonal shadows across shipping labels before sending to Host OCR
-   * while preserving natural text edges.
+   * Pure-JS shadow normalization fallback used only when a clean OCR pass misses a field.
+   * Clamps dark areas (such as black barcodes) so surrounding tracking numbers never wash out.
    */
   function normalizeShadowForOcr(dataUrl) {
     return new Promise((resolve) => {
@@ -649,15 +650,34 @@
         const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
         srcCtx.drawImage(img, 0, 0, width, height);
 
-        // Local illumination map (downscaled + blurred)
-        const bgW = Math.max(32, Math.round(width / 5));
-        const bgH = Math.max(32, Math.round(height / 5));
+        // Downscaled illumination map (~1/16 size acts as hardware box-filter without ctx.filter)
+        const bgW = Math.max(24, Math.round(width / 16));
+        const bgH = Math.max(24, Math.round(height / 16));
         const bgCanvas = document.createElement('canvas');
         bgCanvas.width = bgW;
         bgCanvas.height = bgH;
         const bgCtx = bgCanvas.getContext('2d', { willReadFrequently: true });
-        bgCtx.filter = 'blur(8px)';
         bgCtx.drawImage(srcCanvas, 0, 0, bgW, bgH);
+
+        // Second tiny smooth pass (3x3 average on downscaled grid)
+        const smallData = bgCtx.getImageData(0, 0, bgW, bgH);
+        const sd = smallData.data;
+        const copy = new Uint8ClampedArray(sd);
+        for (let y = 1; y < bgH - 1; y++) {
+          for (let x = 1; x < bgW - 1; x++) {
+            const idx = (y * bgW + x) * 4;
+            let sum = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+              for (let dx = -1; dx <= 1; dx++) {
+                const n = ((y + dy) * bgW + (x + dx)) * 4;
+                sum += 0.299 * copy[n] + 0.587 * copy[n + 1] + 0.114 * copy[n + 2];
+              }
+            }
+            const avg = sum / 9;
+            sd[idx] = sd[idx + 1] = sd[idx + 2] = avg;
+          }
+        }
+        bgCtx.putImageData(smallData, 0, 0);
 
         const bgFullCanvas = document.createElement('canvas');
         bgFullCanvas.width = width;
@@ -672,11 +692,11 @@
 
         for (let i = 0; i < p.length; i += 4) {
           const lum = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
-          const bgLum = Math.max(45, 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2]);
-          let norm = (lum / bgLum) * 238;
-          norm = (norm - 165) * 1.7 + 190;
-          // Blend 65% normalized + 35% original luminance for natural anti-aliased edges
-          let out = norm * 0.65 + lum * 0.35;
+          // Clamp bgLum high enough (>=145) so black barcodes never bleach adjacent tracking numbers
+          const bgLum = Math.max(145, 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2]);
+          let norm = (lum / bgLum) * 232;
+          norm = (norm - 170) * 1.45 + 185;
+          let out = norm * 0.55 + lum * 0.45;
           out = out < 0 ? 0 : out > 255 ? 255 : out;
           p[i] = out;
           p[i + 1] = out;
@@ -733,6 +753,7 @@
     els.trackingSlipPreviewContainer.classList.remove('hidden');
     els.trackingSlipEmptyState.classList.add('hidden');
     els.ocrLowCertaintyNotice.classList.add('hidden');
+    updateLocationReminder();
   }
 
   function clearTrackingSlip() {
@@ -744,30 +765,70 @@
     els.ocrLowCertaintyNotice.classList.add('hidden');
     clearCertaintyMeter('name');
     clearCertaintyMeter('tracking');
+    updateLocationReminder();
   }
 
   async function runHostOcr(standardizedSlipDataUrl) {
     els.ocrProgressBox.classList.remove('hidden');
     els.ocrLowCertaintyNotice.classList.add('hidden');
-    els.ocrStatusText.textContent = 'Removing shadows & reading on host...';
+    els.ocrStatusText.textContent = 'Reading label on host...';
     els.ocrPercentText.textContent = '';
     els.ocrProgressBar.className = 'ocr-progress';
     els.ocrProgressBar.removeAttribute('value');
 
     try {
-      const shadowNormalized = await normalizeShadowForOcr(standardizedSlipDataUrl);
-
+      // Pass 1: Send crisp, unmodified image first (preserves barcode & dark ink edges)
       const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: shadowNormalized })
+        body: JSON.stringify({ imageBase64: standardizedSlipDataUrl })
       }).then((r) => r.json());
 
       if (!res.success) {
         throw new Error(res.error || 'Host OCR failed');
       }
 
-      const extracted = res.extracted || {};
+      let extracted = res.extracted || {};
+      let engineUsed = res.engine || 'host';
+
+      // Pass 2: If a field is missing or uncertain (< 75%), retry with shadow normalization
+      const needsShadowRetry =
+        !extracted.customerName ||
+        !extracted.trackingNumber ||
+        (Number(extracted.customerNameCertainty) || 0) < 75 ||
+        (Number(extracted.trackingNumberCertainty) || 0) < 75;
+
+      if (needsShadowRetry) {
+        els.ocrStatusText.textContent = 'Enhancing shadows & re-checking on host...';
+        const shadowNormalized = await normalizeShadowForOcr(standardizedSlipDataUrl);
+        const res2 = await fetch('/api/ocr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ imageBase64: shadowNormalized })
+        }).then((r) => r.json());
+
+        if (res2.success && res2.extracted) {
+          const ex2 = res2.extracted;
+          const pickName2 =
+            (!extracted.customerName && Boolean(ex2.customerName)) ||
+            (Number(ex2.customerNameCertainty) || 0) > (Number(extracted.customerNameCertainty) || 0);
+          const pickTrack2 =
+            (!extracted.trackingNumber && Boolean(ex2.trackingNumber)) ||
+            (Number(ex2.trackingNumberCertainty) || 0) > (Number(extracted.trackingNumberCertainty) || 0);
+
+          extracted = {
+            customerName: pickName2 ? ex2.customerName : extracted.customerName,
+            customerNameCertainty: pickName2 ? ex2.customerNameCertainty : extracted.customerNameCertainty,
+            trackingNumber: pickTrack2 ? ex2.trackingNumber : extracted.trackingNumber,
+            trackingNumberCertainty: pickTrack2 ? ex2.trackingNumberCertainty : extracted.trackingNumberCertainty,
+            orderDate: extracted.orderDate || ex2.orderDate
+          };
+          if (pickName2 || pickTrack2) {
+            engineUsed = `${engineUsed}+shadow`;
+          }
+        }
+      }
+
       populateExtractedFields(extracted);
 
       const nameCert = Number(extracted.customerNameCertainty) || 0;
@@ -783,7 +844,7 @@
       els.ocrProgressBar.value = 100;
       els.ocrStatusText.textContent =
         nameCert || trackCert
-          ? `Extracted (${res.engine || 'host'})`
+          ? `Extracted (${engineUsed})`
           : 'Could not read label — retake photo or enter manually';
       els.ocrPercentText.textContent = nameCert || trackCert ? 'Done' : '';
 
@@ -914,6 +975,7 @@
 
     for (const row of rows) {
       const inp = row.querySelector('.product-name-input');
+      const locInput = row.querySelector('.product-location-input');
       const rowSku = (inp.getAttribute('data-sku') || '').toLowerCase();
       const rowName = (inp.getAttribute('data-prod-name') || inp.value || '').trim().toLowerCase();
       if (
@@ -925,12 +987,17 @@
         updateTotalProductQty();
         inp.classList.add('field-autofilled');
         setTimeout(() => inp.classList.remove('field-autofilled'), 600);
+        updateLocationReminder();
+        if (locInput && !locInput.value.trim()) {
+          locInput.focus();
+        }
         return;
       }
     }
 
     for (const row of rows) {
       const inp = row.querySelector('.product-name-input');
+      const locInput = row.querySelector('.product-location-input');
       if (!inp.value.trim()) {
         inp.value = item.sku ? `${item.name} (${item.sku})` : item.name;
         inp.setAttribute('data-sku', item.sku || '');
@@ -939,11 +1006,14 @@
         updateTotalProductQty();
         inp.classList.add('field-autofilled');
         setTimeout(() => inp.classList.remove('field-autofilled'), 600);
+        updateLocationReminder();
+        if (locInput) locInput.focus();
         return;
       }
     }
 
-    addProductRow({ sku: item.sku || '', name: item.name, quantity: 1 });
+    const added = addProductRow({ sku: item.sku || '', name: item.name, quantity: 1, location: '' });
+    added?.querySelector('.product-location-input')?.focus();
   }
 
   function openQuickSlotModal(slotIndex) {
@@ -1011,7 +1081,28 @@
   // SEARCHABLE PRODUCT ROWS
   // ==========================================================================
 
-  function addProductRow(initial = { sku: '', name: '', quantity: 1 }) {
+  function updateLocationReminder() {
+    if (!els.locationReminderNotice || !els.productRowsContainer) return;
+    const hasPictures =
+      state.packagingImagesBase64.length > 0 || Boolean(state.trackingSlipBase64);
+    if (!hasPictures) {
+      els.locationReminderNotice.classList.add('hidden');
+      return;
+    }
+
+    const rows = Array.from(els.productRowsContainer.querySelectorAll('.product-row'));
+    const namedRows = rows.filter(
+      (r) => (r.querySelector('.product-name-input')?.value || '').trim().length > 0
+    );
+    const hasMissingLocation =
+      namedRows.length === 0
+        ? true
+        : namedRows.some((r) => !(r.querySelector('.product-location-input')?.value || '').trim());
+
+    els.locationReminderNotice.classList.toggle('hidden', !hasMissingLocation);
+  }
+
+  function addProductRow(initial = { sku: '', name: '', quantity: 1, location: '' }) {
     const row = document.createElement('div');
     row.className = 'product-row';
 
@@ -1028,9 +1119,21 @@
           data-sku="${escapeHtml(initial.sku || '')}"
           data-prod-name="${escapeHtml(initial.name || '')}"
           autocomplete="off"
+          enterkeyhint="next"
           required
         />
         <div class="product-dropdown hidden"></div>
+      </div>
+      <div class="product-location-wrap">
+        <input
+          type="text"
+          class="product-location-input"
+          placeholder="Location (e.g. Bay A2)"
+          aria-label="Location product was taken from"
+          value="${escapeHtml(initial.location || '')}"
+          autocomplete="off"
+          enterkeyhint="done"
+        />
       </div>
       <div class="qty-stepper">
         <button type="button" class="qty-btn qty-minus" aria-label="Decrease">-</button>
@@ -1048,6 +1151,7 @@
     `;
 
     const input = row.querySelector('.product-name-input');
+    const locationInput = row.querySelector('.product-location-input');
     const dropdown = row.querySelector('.product-dropdown');
     const qtyInput = row.querySelector('.qty-input');
     const minusBtn = row.querySelector('.qty-minus');
@@ -1101,6 +1205,8 @@
           input.setAttribute('data-sku', pickedSku);
           input.setAttribute('data-prod-name', pickedName);
           dropdown.classList.add('hidden');
+          updateLocationReminder();
+          locationInput.focus();
         });
       });
     }
@@ -1116,7 +1222,18 @@
       input.setAttribute('data-sku', '');
       input.setAttribute('data-prod-name', '');
       renderSuggestions(input.value);
+      updateLocationReminder();
     });
+
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing && input.value.trim()) {
+        e.preventDefault();
+        dropdown.classList.add('hidden');
+        locationInput.focus();
+      }
+    });
+
+    locationInput.addEventListener('input', updateLocationReminder);
 
     minusBtn.addEventListener('click', () => {
       qtyInput.value = Math.max(1, (parseInt(qtyInput.value, 10) || 1) - 1);
@@ -1137,13 +1254,17 @@
         input.value = '';
         input.setAttribute('data-sku', '');
         input.setAttribute('data-prod-name', '');
+        locationInput.value = '';
         qtyInput.value = 1;
       }
       updateTotalProductQty();
+      updateLocationReminder();
     });
 
     els.productRowsContainer.appendChild(row);
     updateTotalProductQty();
+    updateLocationReminder();
+    return row;
   }
 
   function updateTotalProductQty() {
@@ -1162,13 +1283,14 @@
       const inp = row.querySelector('.product-name-input');
       const rawVal = inp?.value.trim() || '';
       const qty = Math.max(1, parseInt(row.querySelector('.qty-input')?.value, 10) || 1);
+      const location = (row.querySelector('.product-location-input')?.value || '').trim();
       if (!rawVal) return;
 
       const selectedSku = inp.getAttribute('data-sku') || '';
       const selectedName = inp.getAttribute('data-prod-name') || '';
 
       if (selectedName) {
-        result.push({ sku: selectedSku, name: selectedName, quantity: qty });
+        result.push({ sku: selectedSku, name: selectedName, quantity: qty, location });
       } else {
         const match = state.productsCatalog.find(
           (p) =>
@@ -1179,7 +1301,8 @@
         result.push({
           sku: match ? match.sku : '',
           name: match ? match.name : rawVal,
-          quantity: qty
+          quantity: qty,
+          location
         });
       }
     });
@@ -1219,11 +1342,13 @@
       els.packagingGallery.classList.add('hidden');
       els.packagingEmptyState.classList.remove('hidden');
       els.packagingGallery.innerHTML = '';
+      updateLocationReminder();
       return;
     }
 
     els.packagingGallery.classList.remove('hidden');
     els.packagingEmptyState.classList.add('hidden');
+    updateLocationReminder();
 
     els.packagingGallery.innerHTML = state.packagingImagesBase64
       .map(
@@ -1524,7 +1649,12 @@
 
         const productsText = Array.isArray(d.products)
           ? d.products
-              .map((p) => `${p.quantity}x ${p.sku ? `[${escapeHtml(p.sku)}] ` : ''}${escapeHtml(p.name)}`)
+              .map(
+                (p) =>
+                  `${p.quantity}x ${p.sku ? `[${escapeHtml(p.sku)}] ` : ''}${escapeHtml(p.name)}${
+                    p.location ? ` (Loc: ${escapeHtml(p.location)})` : ''
+                  }`
+              )
               .join(', ')
           : '';
 
@@ -1746,18 +1876,22 @@
         return;
       }
       const s = res.summary;
-      if (!s.products || s.products.length === 0) {
+      const rows = Array.isArray(s.entries) && s.entries.length > 0 ? s.entries : s.products || [];
+      if (rows.length === 0) {
         els.dailySummaryPreviewBox.innerHTML = `<strong>${escapeHtml(s.date)}</strong>: 0 products packaged today.`;
         return;
       }
       els.dailySummaryPreviewBox.innerHTML = `
         <div style="margin-bottom:6px;"><strong>${escapeHtml(s.date)}</strong> — ${s.totalOrders} orders, ${s.totalUnits} total units</div>
         <table class="catalog-table">
-          <thead><tr><th>SKU</th><th>Product</th><th style="text-align:right;">Qty</th></tr></thead>
+          <thead><tr><th>Time</th><th>Product</th><th style="text-align:right;">Qty</th><th>Location</th></tr></thead>
           <tbody>
-            ${s.products
+            ${rows
               .map(
-                (p) => `<tr><td class="mono">${escapeHtml(p.sku || '-')}</td><td>${escapeHtml(p.name)}</td><td style="text-align:right;font-weight:700;">${p.quantity}</td></tr>`
+                (r) =>
+                  `<tr><td class="mono">${escapeHtml(r.time || '-')}</td><td>${escapeHtml(r.name)}${
+                    r.sku ? ` <span class="mono">(${escapeHtml(r.sku)})</span>` : ''
+                  }</td><td style="text-align:right;font-weight:700;">${r.quantity}</td><td>${escapeHtml(r.location || '-')}</td></tr>`
               )
               .join('')}
           </tbody>
