@@ -1,0 +1,723 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Aimex Dispatch</title>
+  <link rel="icon" type="image/png" href="/assets/aimex-icon-gold.png" />
+  <link rel="apple-touch-icon" href="/assets/aimex-icon-gold.png" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</head>
+<body>
+
+  <!-- ==================================================================== -->
+  <!-- FIRST-LAUNCH LOGIN OVERLAY                                           -->
+  <!-- ==================================================================== -->
+  <section id="loginScreen" class="login-screen hidden" aria-labelledby="loginTitle">
+    <div class="login-card">
+      <div class="login-brand">
+        <img
+          src="/assets/aimex-logo-navy.png"
+          alt="Aimex — Living Ahead"
+          class="login-logo-img"
+          width="142"
+          height="130"
+          fetchpriority="high"
+        />
+      </div>
+
+      <h1 id="loginTitle" class="login-title">Warehouse Dispatch</h1>
+      <p class="login-subtitle">Sign in with your staff name to log dispatches and sync your quick-access products.</p>
+
+      <form id="loginForm" class="login-form" novalidate>
+        <div class="field-group">
+          <label for="loginNameInput">Your Name <span aria-hidden="true">*</span></label>
+          <input
+            type="text"
+            id="loginNameInput"
+            name="staff_name"
+            placeholder="e.g. Alex"
+            required
+            autocomplete="name"
+            enterkeyhint="done"
+            data-error="loginNameError"
+          />
+          <div id="loginNameError" class="error-msg">
+            <span role="img" aria-label="Error">!</span> Please enter your staff name.
+          </div>
+        </div>
+        <button type="submit" class="btn btn-brand btn-full btn-lg">Continue</button>
+      </form>
+    </div>
+  </section>
+
+  <!-- ==================================================================== -->
+  <!-- MAIN APP SHELL                                                       -->
+  <!-- ==================================================================== -->
+  <div id="appShell" class="app-shell hidden">
+
+    <!-- AIMEX BRANDED HEADER -->
+    <header class="app-header">
+      <div class="header-inner">
+        <div class="brand-wrap">
+          <img
+            src="/assets/aimex-icon-gold.png"
+            alt=""
+            aria-hidden="true"
+            class="header-logo-mark"
+            width="30"
+            height="26"
+          />
+          <div class="brand-text">
+            <span class="brand-mark">AIMEX</span>
+            <span class="brand-name">DISPATCH</span>
+          </div>
+        </div>
+
+        <div class="header-controls">
+          <button type="button" id="switchUserBtn" class="header-chip" title="Switch signed-in user">
+            <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+              <circle cx="12" cy="7" r="4"/>
+            </svg>
+            <span id="currentUserNameLabel">Staff</span>
+          </button>
+
+          <button type="button" id="googleStatusBtn" class="header-chip status-unlinked" title="Admin &amp; Google Sheets">
+            <span class="status-indicator" aria-hidden="true"></span>
+            <span id="googleStatusText">Setup</span>
+          </button>
+
+          <button type="button" id="wifiAccessBtn" class="header-icon-btn" title="Wi-Fi QR Code" aria-label="Connect Mobile Device via Wi-Fi QR Code">
+            <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <path d="M5 12.55a11 11 0 0 1 14.08 0"/>
+              <path d="M8.53 16.11a6 6 0 0 1 6.95 0"/>
+              <line x1="12" y1="20" x2="12.01" y2="20"/>
+            </svg>
+          </button>
+
+          <button type="button" id="settingsBtn" class="header-icon-btn" title="Admin Settings" aria-label="Admin Settings">
+            <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+              <circle cx="12" cy="12" r="3"/>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- SEGMENTED NAVIGATION -->
+      <div class="nav-wrap">
+        <div class="segmented-tabs" role="tablist" aria-label="Workspace sections">
+          <button
+            type="button"
+            id="tabBtnDispatch"
+            class="seg-tab active"
+            role="tab"
+            aria-selected="true"
+            data-tab="dispatchTab"
+          >
+            Dispatch
+          </button>
+          <button
+            type="button"
+            id="tabBtnHistory"
+            class="seg-tab"
+            role="tab"
+            aria-selected="false"
+            data-tab="historyTab"
+          >
+            History <span id="historyCountBadge" class="seg-count">0</span>
+          </button>
+          <button
+            type="button"
+            id="tabBtnProducts"
+            class="seg-tab"
+            role="tab"
+            aria-selected="false"
+            data-tab="productsTab"
+          >
+            Products <span id="productsCountBadge" class="seg-count">0</span>
+          </button>
+        </div>
+      </div>
+    </header>
+
+    <!-- MAIN CONTAINER -->
+    <main class="main-container">
+
+      <!-- ================================================================ -->
+      <!-- TAB 1: NEW DISPATCH                                              -->
+      <!-- ================================================================ -->
+      <section
+        id="dispatchTab"
+        class="tab-panel active"
+        role="tabpanel"
+        aria-labelledby="tabBtnDispatch"
+      >
+
+        <div id="dispatchAlertBanner" class="alert-banner hidden" role="status" aria-live="polite"></div>
+
+        <form id="dispatchForm" class="stack" aria-label="New dispatch entry" novalidate>
+
+          <!-- 1. TRACKING SLIP PHOTO (HOST OCR) -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Tracking Slip</h2>
+                <p class="card-sub">Host extracts customer and tracking number automatically</p>
+              </div>
+              <span id="ocrEngineBadge" class="meta-pill">Host OCR</span>
+            </div>
+
+            <div class="action-row">
+              <label class="btn btn-brand" for="trackingSlipCameraInput">
+                <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                  <circle cx="12" cy="13" r="4"/>
+                </svg>
+                Take Photo
+              </label>
+              <input type="file" id="trackingSlipCameraInput" accept="image/*" capture="environment" class="sr-only" />
+
+              <label class="btn btn-outline" for="trackingSlipFileInput">
+                Upload
+              </label>
+              <input type="file" id="trackingSlipFileInput" accept="image/*" class="sr-only" />
+
+              <button type="button" id="loadSampleSlipBtn" class="btn btn-subtle">
+                Sample Slip
+              </button>
+            </div>
+
+            <div id="trackingSlipPreviewContainer" class="slip-preview hidden">
+              <div class="slip-frame">
+                <img id="trackingSlipPreviewImg" src="" alt="Captured tracking slip preview" />
+                <div class="slip-overlay-actions">
+                  <button type="button" id="rescanSlipBtn" class="btn btn-xs btn-surface">Re-scan</button>
+                  <button type="button" id="removeSlipBtn" class="btn btn-xs btn-surface">Remove</button>
+                </div>
+              </div>
+              <div id="ocrProgressBox" class="ocr-bar hidden">
+                <div class="ocr-bar-meta">
+                  <span id="ocrStatusText">Processing on host...</span>
+                  <span id="ocrPercentText"></span>
+                </div>
+                <progress id="ocrProgressBar" class="ocr-progress" max="100" aria-labelledby="ocrStatusText"></progress>
+              </div>
+            </div>
+
+            <div id="ocrLowCertaintyNotice" class="certainty-notice hidden" role="status" aria-live="polite">
+              Low OCR certainty on one or more fields. Please verify below or tap <strong>Take Photo</strong> in clearer lighting.
+            </div>
+
+            <div id="trackingSlipEmptyState" class="empty-box">
+              Tap <strong>Take Photo</strong> or <strong>Sample Slip</strong> to scan a tracking label.
+            </div>
+          </div>
+
+          <!-- 2. ORDER DETAILS WITH CERTAINTY METERS -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Order Details</h2>
+                <p class="form-req-note">Fields marked <span aria-hidden="true">*</span> are required.</p>
+              </div>
+            </div>
+
+            <div class="fields-stack">
+              <div class="field-group">
+                <div class="label-row">
+                  <label for="customerNameInput">Customer Name <span class="req" aria-hidden="true">*</span></label>
+                  <div id="nameCertaintyWrap" class="certainty-meter hidden">
+                    <span id="nameCertaintyText" class="certainty-pct">0%</span>
+                    <progress id="nameCertaintyFill" class="certainty-progress" max="100" value="0" aria-label="Customer name OCR certainty"></progress>
+                  </div>
+                </div>
+                <input
+                  type="text"
+                  id="customerNameInput"
+                  name="customer_name"
+                  placeholder="Recipient full name"
+                  required
+                  autocomplete="off"
+                  enterkeyhint="next"
+                  data-error="customerNameError"
+                />
+                <div id="customerNameError" class="error-msg">
+                  <span role="img" aria-label="Error">!</span> Customer name is required.
+                </div>
+              </div>
+
+              <div class="fields-split">
+                <div class="field-group">
+                  <div class="label-row">
+                    <label for="trackingNumberInput">Tracking Number <span class="req" aria-hidden="true">*</span></label>
+                    <div id="trackingCertaintyWrap" class="certainty-meter hidden">
+                      <span id="trackingCertaintyText" class="certainty-pct">0%</span>
+                      <progress id="trackingCertaintyFill" class="certainty-progress" max="100" value="0" aria-label="Tracking number OCR certainty"></progress>
+                    </div>
+                  </div>
+                  <input
+                    type="text"
+                    id="trackingNumberInput"
+                    name="tracking_number"
+                    class="mono"
+                    placeholder="e.g. CPCTOZE0000179"
+                    required
+                    autocomplete="off"
+                    autocorrect="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    enterkeyhint="next"
+                    data-error="trackingNumberError"
+                  />
+                  <div id="trackingNumberError" class="error-msg">
+                    <span role="img" aria-label="Error">!</span> Tracking number is required.
+                  </div>
+                </div>
+
+                <div class="field-group">
+                  <div class="label-row">
+                    <label for="orderDateInput">Order Date <span class="req" aria-hidden="true">*</span></label>
+                  </div>
+                  <input
+                    type="date"
+                    id="orderDateInput"
+                    name="order_date"
+                    required
+                    data-error="orderDateError"
+                  />
+                  <div id="orderDateError" class="error-msg">
+                    <span role="img" aria-label="Error">!</span> Order date is required.
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. PRODUCTS & QUANTITY + 3x2 USER QUICK ACCESS GRID -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Products &amp; Quantity</h2>
+                <p class="card-sub">Tap quick-access slots or search by name / SKU</p>
+              </div>
+              <span class="meta-pill">Total: <strong id="totalProductsQtyBadge">1</strong></span>
+            </div>
+
+            <div class="quick-access-section">
+              <div class="quick-access-header">
+                <span class="quick-access-label">Quick Access</span>
+                <button type="button" id="toggleEditQuickBtn" class="btn-link">Edit Slots</button>
+              </div>
+              <div id="quickAccessGrid" class="quick-access-grid"></div>
+            </div>
+
+            <hr class="hairline" />
+
+            <div id="productRowsContainer" class="product-rows"></div>
+
+            <div class="row-between">
+              <button type="button" id="addProductRowBtn" class="btn btn-outline btn-sm">
+                + Add Product
+              </button>
+              <button type="button" id="syncProductsFromSheetBtn" class="btn btn-subtle btn-sm">
+                Sync Catalog
+              </button>
+            </div>
+          </div>
+
+          <!-- 4. PACKAGING PICTURES -->
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Packaging Pictures</h2>
+                <p class="card-sub">Capture photos of packed items and parcel</p>
+              </div>
+              <span id="packagingCountBadge" class="meta-pill">0 photos</span>
+            </div>
+
+            <div class="action-row">
+              <label class="btn btn-brand" for="packagingCameraInput">
+                <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                  <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/>
+                  <circle cx="12" cy="13" r="4"/>
+                </svg>
+                Take Photo
+              </label>
+              <input type="file" id="packagingCameraInput" accept="image/*" capture="environment" multiple class="sr-only" />
+
+              <label class="btn btn-outline" for="packagingFileInput">
+                Upload Photos
+              </label>
+              <input type="file" id="packagingFileInput" accept="image/*" multiple class="sr-only" />
+            </div>
+
+            <div id="packagingGallery" class="thumb-grid hidden"></div>
+
+            <div id="packagingEmptyState" class="empty-box">
+              No packaging photos added yet.
+            </div>
+          </div>
+
+          <!-- SUBMIT BAR -->
+          <div class="submit-bar">
+            <button type="button" id="resetFormBtn" class="btn btn-outline btn-lg">Clear</button>
+            <button type="submit" id="submitDispatchBtn" class="btn btn-accent-gold btn-lg flex-1">
+              Save Dispatch
+            </button>
+          </div>
+
+        </form>
+      </section>
+
+      <!-- ================================================================ -->
+      <!-- TAB 2: SEARCH HISTORY                                            -->
+      <!-- ================================================================ -->
+      <section
+        id="historyTab"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tabBtnHistory"
+        hidden
+      >
+        <div class="card stack">
+          <search>
+            <div class="search-bar">
+              <input
+                type="search"
+                id="historySearchInput"
+                aria-label="Search dispatch history"
+                placeholder="Search customer, tracking number, product, or staff..."
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck="false"
+                enterkeyhint="search"
+              />
+              <a href="/api/dispatches/export.csv" class="btn btn-outline btn-sm">Export CSV</a>
+            </div>
+          </search>
+          <div id="dispatchesListContainer" class="history-list"></div>
+        </div>
+      </section>
+
+      <!-- ================================================================ -->
+      <!-- TAB 3: PRODUCTS CATALOG                                          -->
+      <!-- ================================================================ -->
+      <section
+        id="productsTab"
+        class="tab-panel"
+        role="tabpanel"
+        aria-labelledby="tabBtnProducts"
+        hidden
+      >
+        <div class="stack">
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Add New Product</h2>
+                <p class="card-sub">Added to local list and Google Sheet Products tab</p>
+              </div>
+            </div>
+            <form id="addProductForm" class="fields-stack" aria-label="Add new product" novalidate>
+              <div class="fields-split">
+                <div class="field-group">
+                  <label for="newProdSku">SKU</label>
+                  <input
+                    type="text"
+                    id="newProdSku"
+                    name="sku"
+                    placeholder="e.g. AIM8STG3"
+                    autocorrect="off"
+                    autocapitalize="characters"
+                    spellcheck="false"
+                    enterkeyhint="next"
+                  />
+                </div>
+                <div class="field-group">
+                  <label for="newProdCategory">Category</label>
+                  <input type="text" id="newProdCategory" name="category" placeholder="e.g. Filters" enterkeyhint="next" />
+                </div>
+              </div>
+              <div class="field-group">
+                <label for="newProdName">Product Name <span class="req" aria-hidden="true">*</span></label>
+                <input
+                  type="text"
+                  id="newProdName"
+                  name="product_name"
+                  placeholder="e.g. 8 Stage Filter X 3"
+                  required
+                  enterkeyhint="done"
+                  data-error="newProdNameError"
+                />
+                <div id="newProdNameError" class="error-msg">
+                  <span role="img" aria-label="Error">!</span> Product name is required.
+                </div>
+              </div>
+              <button type="submit" class="btn btn-brand">Add Product</button>
+            </form>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <div>
+                <h2 class="card-title">Product Catalog</h2>
+              </div>
+              <button type="button" id="refreshCatalogBtn" class="btn btn-outline btn-sm">Sync Sheet</button>
+            </div>
+            <search class="catalog-search-wrap">
+              <div class="field-group">
+                <input
+                  type="search"
+                  id="catalogSearchInput"
+                  aria-label="Filter products by SKU or name"
+                  placeholder="Filter products by SKU or name..."
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  enterkeyhint="search"
+                />
+              </div>
+            </search>
+            <div
+              id="catalogTableWrapper"
+              class="table-scroll"
+              tabindex="0"
+              role="region"
+              aria-label="Aimex Product Catalog"
+            ></div>
+          </div>
+        </div>
+      </section>
+
+    </main>
+  </div>
+
+  <!-- ==================================================================== -->
+  <!-- QUICK ACCESS SLOT PICKER MODAL (Native <dialog>)                     -->
+  <!-- ==================================================================== -->
+  <dialog id="quickSlotModal" class="native-modal" aria-labelledby="quickSlotModalTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="quickSlotModalTitle">Assign Quick Access Slot</h2>
+        <button type="button" class="modal-close" data-close-modal="quickSlotModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body stack">
+        <div class="field-group">
+          <label for="quickSlotSearchInput">Search Product or SKU</label>
+          <input
+            type="search"
+            id="quickSlotSearchInput"
+            placeholder="Type product name or SKU..."
+            autocomplete="off"
+            autocorrect="off"
+            autocapitalize="none"
+            spellcheck="false"
+            autofocus
+          />
+        </div>
+        <div id="quickSlotResults" class="quick-slot-results"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="clearQuickSlotBtn" class="btn btn-outline btn-sm">Clear Slot</button>
+        <button type="button" class="btn btn-subtle btn-sm" data-close-modal="quickSlotModal">Cancel</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- ADMIN LOGIN & SETTINGS MODAL (Native <dialog>)                       -->
+  <!-- ==================================================================== -->
+  <dialog id="settingsModal" class="native-modal" aria-labelledby="settingsModalTitle" closedby="closerequest">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <h2 id="settingsModalTitle">Admin Settings</h2>
+        <button type="button" class="modal-close" data-close-modal="settingsModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+
+      <!-- Admin Password Gate -->
+      <div id="adminLoginGate" class="modal-body stack">
+        <p class="card-sub">Enter the administrator password to configure Google Sheets, Daily Summary Emails, and OCR settings.</p>
+        <form id="adminLoginForm" class="stack" novalidate>
+          <div class="field-group">
+            <label for="adminPasswordInput">Admin Password <span class="req" aria-hidden="true">*</span></label>
+            <input
+              type="password"
+              id="adminPasswordInput"
+              name="admin_password"
+              placeholder="Default: aimexadmin"
+              autocomplete="current-password"
+              required
+              data-error="adminPasswordError"
+            />
+            <div id="adminPasswordError" class="error-msg">
+              <span role="img" aria-label="Error">!</span> Please enter the admin password.
+            </div>
+          </div>
+          <div id="adminLoginError" class="result-note result-err hidden" role="status"></div>
+          <button type="submit" class="btn btn-brand">Unlock Admin Settings</button>
+        </form>
+      </div>
+
+      <!-- Unlocked Admin Panel -->
+      <div id="adminPanelBody" class="modal-body stack hidden">
+
+        <!-- 1. Daily Packaged Products Summary Email -->
+        <div class="admin-block">
+          <div class="row-between row-tight">
+            <h3 class="admin-block-title">Daily Packaged Products Email</h3>
+            <label class="toggle-switch" for="dailyEmailEnabledInput">
+              <input type="checkbox" id="dailyEmailEnabledInput" switch />
+              <span class="toggle-label">Enabled</span>
+            </label>
+          </div>
+          <p class="card-sub">Automatically emails total quantities of every product packed across all staff each day.</p>
+
+          <div class="fields-split block-gap-sm">
+            <div class="field-group">
+              <label for="dailyEmailAdminInput">Administrator Email</label>
+              <input type="email" id="dailyEmailAdminInput" autocomplete="email" placeholder="admin@aimex.com.au" />
+            </div>
+            <div class="field-group">
+              <label for="dailyEmailTimeInput">Send Time (AEST)</label>
+              <input type="time" id="dailyEmailTimeInput" value="15:00" />
+            </div>
+          </div>
+
+          <div class="action-row block-gap-sm">
+            <button type="button" id="previewDailySummaryBtn" class="btn btn-outline btn-sm">Preview Today's Totals</button>
+            <button type="button" id="sendDailySummaryNowBtn" class="btn btn-accent-gold btn-sm">Send Summary Email Now</button>
+          </div>
+          <div id="dailyEmailStatusNote" class="result-note hidden block-gap-xs" role="status"></div>
+          <div id="dailySummaryPreviewBox" class="summary-preview-box hidden"></div>
+        </div>
+
+        <hr class="hairline" />
+
+        <!-- 2. Google Sheets Connection -->
+        <div class="admin-block">
+          <h3 class="admin-block-title">Google Sheets &amp; Drive Connection</h3>
+          <div class="field-group block-gap-xs">
+            <label for="settingsGoogleScriptUrl">Google Apps Script Web App URL</label>
+            <input
+              type="url"
+              id="settingsGoogleScriptUrl"
+              placeholder="https://script.google.com/macros/s/.../exec"
+              autocorrect="off"
+              autocapitalize="none"
+              spellcheck="false"
+            />
+          </div>
+
+          <div class="action-row block-gap-sm">
+            <button type="button" id="testGoogleSheetBtn" class="btn btn-outline btn-sm">Test</button>
+            <button type="button" id="initGoogleSheetBtn" class="btn btn-brand btn-sm">Initialize Sheet</button>
+            <button type="button" id="copyAppsScriptBtn" class="btn btn-subtle btn-sm">Copy Code.gs</button>
+            <a id="openGoogleSheetLink" href="#" target="_blank" rel="noopener" class="btn btn-subtle btn-sm hidden">Open Sheet</a>
+          </div>
+          <div id="googleTestResultBox" class="result-note hidden block-gap-xs" role="status"></div>
+        </div>
+
+        <hr class="hairline" />
+
+        <!-- 3. Host OCR Engine -->
+        <div class="admin-block">
+          <h3 class="admin-block-title">Host OCR Engine</h3>
+          <div class="fields-split block-gap-xs">
+            <div class="field-group">
+              <label for="settingsOcrMode">OCR Mode</label>
+              <select id="settingsOcrMode">
+                <option value="auto">Auto (Gemini AI if key set, else Windows/Host OCR)</option>
+                <option value="host">Host OCR Only (Free, Offline)</option>
+                <option value="gemini">Gemini Vision AI (Highest Accuracy)</option>
+              </select>
+            </div>
+            <div class="field-group">
+              <label for="settingsGeminiApiKey">Optional Gemini API Key</label>
+              <input
+                type="password"
+                id="settingsGeminiApiKey"
+                placeholder="AIzaSy... (optional)"
+                autocomplete="off"
+                autocorrect="off"
+                autocapitalize="none"
+                spellcheck="false"
+              />
+            </div>
+          </div>
+        </div>
+
+        <hr class="hairline" />
+
+        <!-- 4. Change Admin Password -->
+        <div class="admin-block">
+          <h3 class="admin-block-title">Change Admin Password</h3>
+          <div class="row-between block-gap-xs">
+            <input
+              type="password"
+              id="newAdminPasswordInput"
+              placeholder="New password (min 4 chars)"
+              autocomplete="new-password"
+              class="flex-1"
+            />
+            <button type="button" id="changeAdminPasswordBtn" class="btn btn-outline btn-sm">Update Password</button>
+          </div>
+          <div id="adminPwResultBox" class="result-note hidden block-gap-xs" role="status"></div>
+        </div>
+
+      </div>
+
+      <div id="adminPanelFooter" class="modal-footer hidden">
+        <button type="button" class="btn btn-outline" data-close-modal="settingsModal">Cancel</button>
+        <button type="button" id="saveSettingsBtn" class="btn btn-brand">Save Settings</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- WI-FI ACCESS MODAL (Native <dialog>)                                 -->
+  <!-- ==================================================================== -->
+  <dialog id="wifiModal" class="native-modal" aria-labelledby="wifiModalTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="wifiModalTitle">Connect Mobile Device</h2>
+        <button type="button" class="modal-close" data-close-modal="wifiModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body center-col">
+        <p class="card-sub">Scan on a phone or iPad connected to the same Wi-Fi network.</p>
+        <div id="wifiQrContainer" class="qr-box"></div>
+        <div id="wifiUrlsList" class="wifi-urls"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-brand" data-close-modal="wifiModal">Done</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- LIGHTBOX MODAL (Native <dialog>)                                     -->
+  <!-- ==================================================================== -->
+  <dialog id="lightboxModal" class="native-modal" aria-labelledby="lightboxTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="lightboxTitle">Photo</h2>
+        <button type="button" class="modal-close" data-close-modal="lightboxModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body center-col">
+        <img id="lightboxImg" src="" alt="Full resolution preview" class="lightbox-img" />
+      </div>
+    </div>
+  </dialog>
+
+</body>
+</html>
