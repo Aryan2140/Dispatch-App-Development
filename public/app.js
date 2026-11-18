@@ -139,6 +139,9 @@
       'newAdminPasswordInput',
       'changeAdminPasswordBtn',
       'adminPwResultBox',
+      'checkUpdateBtn',
+      'installUpdateBtn',
+      'appUpdateResultBox',
       'saveSettingsBtn',
       'wifiModal',
       'wifiQrContainer',
@@ -569,6 +572,8 @@
     els.previewDailySummaryBtn.addEventListener('click', handlePreviewDailySummary);
     els.sendDailySummaryNowBtn.addEventListener('click', handleSendDailySummaryNow);
     els.changeAdminPasswordBtn.addEventListener('click', handleChangeAdminPassword);
+    els.checkUpdateBtn?.addEventListener('click', () => handleAppUpdate(false));
+    els.installUpdateBtn?.addEventListener('click', () => handleAppUpdate(true));
     els.saveSettingsBtn.addEventListener('click', handleSaveSettings);
   }
 
@@ -2175,6 +2180,41 @@
       els.adminPwResultBox.style.background = '#fef2f2';
       els.adminPwResultBox.style.color = '#991b1b';
       els.adminPwResultBox.textContent = err.message;
+    }
+  }
+
+  async function handleAppUpdate(install = false) {
+    if (!els.appUpdateResultBox) return;
+    els.appUpdateResultBox.classList.remove('hidden');
+    els.appUpdateResultBox.style.background = '#f1f5f9';
+    els.appUpdateResultBox.style.color = '#334155';
+    els.appUpdateResultBox.textContent = install ? 'Installing update & restarting...' : 'Checking GitHub for updates...';
+
+    try {
+      const res = await adminFetch('/api/admin/update', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ install })
+      });
+
+      if (!res.success) {
+        els.appUpdateResultBox.style.background = '#fef2f2';
+        els.appUpdateResultBox.style.color = '#991b1b';
+        els.appUpdateResultBox.textContent = res.error || 'Update failed.';
+        return;
+      }
+
+      els.appUpdateResultBox.style.background = '#ecfdf5';
+      els.appUpdateResultBox.style.color = '#065f46';
+      els.appUpdateResultBox.textContent = res.message;
+
+      if (install && res.updated) {
+        setTimeout(() => window.location.reload(), 3000);
+      }
+    } catch (err) {
+      els.appUpdateResultBox.style.background = '#fef2f2';
+      els.appUpdateResultBox.style.color = '#991b1b';
+      els.appUpdateResultBox.textContent = err.message;
     }
   }
 

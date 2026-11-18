@@ -1013,6 +1013,80 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { success: true, code });
     }
 
+    if (pathname === '/api/admin/update' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return;
+      const body = await parseJsonBody(req);
+      const shouldInstall = Boolean(body.install);
+
+      const runGit = (args) =>
+        new Promise((resolve, reject) => {
+          execFile('git', args, { cwd: __dirname, timeout: 25000 }, (err, stdout, stderr) => {
+            if (err) return reject(new Error((stderr || stdout || err.message).trim()));
+            resolve((stdout || '').trim());
+          });
+        });
+
+      try {
+        const remotes = await runGit(['remote']);
+        if (!remotes) {
+          return sendJson(res, 400, {
+            success: false,
+            error: 'No GitHub remote (origin) configured on this host yet.'
+          });
+        }
+
+        await runGit(['fetch', 'origin']);
+        const branch = (await runGit(['rev-parse', '--abbrev-ref', 'HEAD'])) || 'main';
+        const behindRaw = await runGit(['rev-list', '--count', `HEAD..origin/${branch}`]);
+        const behindCount = Number(behindRaw) || 0;
+
+        if (!shouldInstall) {
+          return sendJson(res, 200, {
+            success: true,
+            upToDate: behindCount === 0,
+            behindCount,
+            message:
+              behindCount === 0
+                ? 'App is already up to date.'
+                : `${behindCount} new update(s) available on GitHub.`
+          });
+        }
+
+        if (behindCount === 0) {
+          return sendJson(res, 200, {
+            success: true,
+            updated: false,
+            message: 'App is already up to date.'
+          });
+        }
+
+        const pullOut = await runGit(['pull', '--ff-only', 'origin', branch]);
+        sendJson(res, 200, {
+          success: true,
+          updated: true,
+          message: `Updated (${pullOut.split('\n')[0] || 'OK'}). Restarting server...`
+        });
+
+        setTimeout(() => {
+          try {
+            const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
+              cwd: __dirname,
+              detached: true,
+              stdio: 'ignore'
+            });
+            child.unref();
+          } catch (e) {}
+          process.exit(0);
+        }, 600);
+        return;
+      } catch (err) {
+        return sendJson(res, 500, {
+          success: false,
+          error: err.message || 'Update check failed.'
+        });
+      }
+    }
+
     // 3. Per-User Quick Access Grid Preferences
     if (pathname === '/api/user-prefs' && req.method === 'GET') {
       const rawUser = (parsedUrl.searchParams.get('user') || '').trim();
