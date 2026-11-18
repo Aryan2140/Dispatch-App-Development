@@ -428,8 +428,12 @@ function ensureWindowsOcrProcess() {
   winOcrProc = spawn(
     'powershell.exe',
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath],
-    { stdio: ['pipe', 'pipe', 'ignore'] }
+    { stdio: ['pipe', 'pipe', 'pipe'] }
   );
+  winOcrProc.stderr.on('data', (d) => {
+    const msg = d.toString('utf8').trim();
+    if (msg) console.warn('[Windows OCR]', msg);
+  });
   winOcrProc.on('exit', () => {
     winOcrProc = null;
   });
@@ -456,7 +460,7 @@ function runWindowsOcrOnFile(imgPath) {
           try { proc.kill(); } catch (e) {}
           winOcrProc = null;
           resolve(null);
-        }, 10000);
+        }, 20000);
 
         function onData(chunk) {
           buffer += chunk.toString('utf8');

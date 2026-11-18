@@ -21,8 +21,19 @@ function Await($WinRtTask, $ResultType) {
 
 $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
 if ($null -eq $engine) {
-  $enLang = New-Object Windows.Globalization.Language("en-US")
-  $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($enLang)
+  foreach ($tag in @("en-AU", "en-GB", "en-US")) {
+    try {
+      $lang = New-Object Windows.Globalization.Language($tag)
+      $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($lang)
+      if ($null -ne $engine) { break }
+    } catch {}
+  }
+}
+if ($null -eq $engine) {
+  $avail = [Windows.Media.Ocr.OcrEngine]::AvailableRecognizerLanguages
+  if ($avail -and $avail.Count -gt 0) {
+    $engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromLanguage($avail[0])
+  }
 }
 
 [Console]::InputEncoding = [System.Text.Encoding]::UTF8
@@ -35,7 +46,8 @@ while ($true) {
   if ($imgPath -eq '') { continue }
 
   try {
-    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath)) ([Windows.Storage.StorageFile])
+    $fullPath = [System.IO.Path]::GetFullPath($imgPath)
+    $file = Await ([Windows.Storage.StorageFile]::GetFileFromPathAsync($fullPath)) ([Windows.Storage.StorageFile])
     $stream = Await ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
     try {
       $decoder = Await ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])

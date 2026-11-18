@@ -534,15 +534,23 @@
     els.orderNumberInput?.addEventListener('input', updateOrderNumberReminder);
     els.syncProductsFromSheetBtn.addEventListener('click', () => loadProductsCatalog(true));
 
-    // Compact sticky header on scroll
+    // Compact sticky header on scroll (with wide hysteresis to prevent mobile layout jitter)
     const headerEl = document.querySelector('.app-header');
     if (headerEl) {
+      let lastToggleAt = 0;
       window.addEventListener(
         'scroll',
         () => {
+          const now = Date.now();
+          if (now - lastToggleAt < 250) return;
           const y = window.scrollY || 0;
-          if (y > 24) headerEl.classList.add('is-scrolled');
-          else if (y <= 12) headerEl.classList.remove('is-scrolled');
+          if (y > 80 && !headerEl.classList.contains('is-scrolled')) {
+            headerEl.classList.add('is-scrolled');
+            lastToggleAt = now;
+          } else if (y <= 8 && headerEl.classList.contains('is-scrolled')) {
+            headerEl.classList.remove('is-scrolled');
+            lastToggleAt = now;
+          }
         },
         { passive: true }
       );
