@@ -75,6 +75,7 @@
       'ocrProgressBar',
       'ocrLowCertaintyNotice',
       'trackingSlipEmptyState',
+      'orderNumberInput',
       'customerNameInput',
       'trackingNumberInput',
       'orderDateInput',
@@ -1394,6 +1395,7 @@
       return;
     }
 
+    const orderNumber = els.orderNumberInput.value.trim();
     const customerName = els.customerNameInput.value.trim();
     const trackingNumber = els.trackingNumberInput.value.trim();
     const orderDate = els.orderDateInput.value || getTodayIsoDate();
@@ -1421,6 +1423,7 @@
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          orderNumber,
           customerName,
           trackingNumber,
           orderDate,
@@ -1441,6 +1444,7 @@
           const gsRes = await callAppsScriptPost(state.config.googleScriptUrl, {
             action: 'createDispatch',
             dispatchId: d.dispatchId,
+            orderNumber: d.orderNumber || '',
             orderDate: d.orderDate,
             trackingNumber: d.trackingNumber,
             customerName: d.customerName,
@@ -1488,6 +1492,7 @@
 
   function resetDispatchForm(clearBanner = true) {
     clearTrackingSlip();
+    els.orderNumberInput.value = '';
     els.customerNameInput.value = '';
     els.trackingNumberInput.value = '';
     els.orderDateInput.value = getTodayIsoDate();
@@ -1749,7 +1754,7 @@
               </div>
             </div>
             <div class="history-meta">
-              <div><strong>Order Date:</strong> ${escapeHtml(d.orderDate || '-')} &middot; <strong>Staff:</strong> ${escapeHtml(d.staffName || d.staffMember || '-')}</div>
+              <div>${d.orderNumber ? `<strong>Order #:</strong> <span class="mono">${escapeHtml(d.orderNumber)}</span> &middot; ` : ''}<strong>Order Date:</strong> ${escapeHtml(d.orderDate || '-')} &middot; <strong>Staff:</strong> ${escapeHtml(d.staffName || d.staffMember || '-')}</div>
               <div><strong>Items (${d.totalQty || 0}):</strong> ${productsText || '-'}</div>
             </div>
             <div class="history-thumbs">${thumbs.join('')}${driveLink}${retryBtn}${deleteBtn}</div>
@@ -1794,6 +1799,7 @@
               const gsRes = await callAppsScriptPost(state.config.googleScriptUrl, {
                 action: 'createDispatch',
                 dispatchId: record.dispatchId,
+                orderNumber: record.orderNumber || '',
                 orderDate: record.orderDate || '',
                 trackingNumber: record.trackingNumber || record.connote || '',
                 customerName: record.customerName || '',

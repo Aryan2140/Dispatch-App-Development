@@ -229,6 +229,24 @@
             <div class="fields-stack">
               <div class="field-group">
                 <div class="label-row">
+                  <label for="orderNumberInput">Order Number <span class="optional-tag">(Optional)</span></label>
+                </div>
+                <input
+                  type="text"
+                  id="orderNumberInput"
+                  name="order_number"
+                  class="mono"
+                  placeholder="Manual entry, e.g. 14282"
+                  autocomplete="off"
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  enterkeyhint="next"
+                />
+              </div>
+
+              <div class="field-group">
+                <div class="label-row">
                   <label for="customerNameInput">Customer Name <span class="req" aria-hidden="true">*</span></label>
                   <div id="nameCertaintyWrap" class="certainty-meter hidden">
                     <span id="nameCertaintyText" class="certainty-pct">0%</span>
@@ -360,6 +378,12 @@
             <div id="packagingEmptyState" class="empty-box">
               No packaging photos added yet.
             </div>
+          </div>
+
+          <!-- OPTIONAL ORDER NUMBER / NAME SPELLING REMINDER (NON-BLOCKING) -->
+          <div id="orderCheckReminderNotice" class="order-check-reminder" role="status" aria-live="polite">
+            <span class="order-check-icon" aria-hidden="true">i</span>
+            <span><strong>Before saving:</strong> Add the <strong>Order Number</strong> if available, or double-check that the <strong>Customer Name</strong> is spelt correctly.</span>
           </div>
 
           <!-- OPTIONAL LOCATION REMINDER (NON-BLOCKING) -->

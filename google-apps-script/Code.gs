@@ -69,7 +69,8 @@ function formatDispatchSheet_(sheet) {
     'Packaging Photos',
     'Packaging Preview',
     'Drive Folder',
-    'Products JSON'
+    'Products JSON',
+    'Order Number'
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -296,6 +297,7 @@ function doPost(e) {
       const dateFolderPrefix = Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyy-MM-dd');
 
       const dispatchId = body.dispatchId || ('DSP-' + Utilities.formatDate(now, CONFIG.TIMEZONE, 'yyyyMMdd-HHmmss'));
+      const orderNumber = String(body.orderNumber || '').trim();
       const orderDate = (body.orderDate || dateFolderPrefix).trim();
       const trackingNumber = (body.trackingNumber || body.connote || '').trim();
       const customerName = (body.customerName || '').trim();
@@ -377,7 +379,8 @@ function doPost(e) {
         packagingDriveUrls.join('\n') || 'None',
         '',
         dispatchFolder.getUrl(),
-        JSON.stringify(products)
+        JSON.stringify(products),
+        orderNumber
       ];
 
       dispatchSheet.getRange(nextRow, 1, 1, rowValues.length).setValues([rowValues]);
@@ -700,6 +703,7 @@ function searchDispatches_(ss, query, limit) {
       } catch (e) {}
       results.push({
         dispatchId: r[0],
+        orderNumber: r[14] || '',
         timestamp: r[1],
         orderDate: r[2],
         trackingNumber: r[3],

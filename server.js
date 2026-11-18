@@ -1326,6 +1326,7 @@ async function handleRequest(req, res) {
           : '';
         const haystack = [
           d.dispatchId,
+          d.orderNumber,
           d.orderDate,
           d.timestamp,
           d.trackingNumber || d.connote,
@@ -1352,6 +1353,7 @@ async function handleRequest(req, res) {
       const dispatches = readJsonFile(DISPATCHES_FILE, []);
       const csvHeaders = [
         'Dispatch ID',
+        'Order Number',
         'Logged Timestamp',
         'Order Date',
         'Tracking Number',
@@ -1378,6 +1380,7 @@ async function handleRequest(req, res) {
         rows.push(
           [
             d.dispatchId,
+            d.orderNumber || '',
             d.timestamp,
             d.orderDate || '',
             d.trackingNumber || d.connote || '',
@@ -1443,6 +1446,7 @@ async function handleRequest(req, res) {
         });
       }
 
+      const orderNumber = String(body.orderNumber || '').trim();
       const trackingNumber = String(body.trackingNumber || body.connote || '').trim();
       const customerName = String(body.customerName || '').trim();
       const orderDate = String(body.orderDate || getSydneyDateAndTime(now).dateStr).trim();
@@ -1450,6 +1454,7 @@ async function handleRequest(req, res) {
 
       const record = {
         dispatchId,
+        orderNumber,
         timestamp,
         createdAtIso: now.toISOString(),
         orderDate,
@@ -1473,6 +1478,7 @@ async function handleRequest(req, res) {
           const gsPayload = JSON.stringify({
             action: 'createDispatch',
             dispatchId: record.dispatchId,
+            orderNumber: record.orderNumber,
             orderDate: record.orderDate,
             trackingNumber: record.trackingNumber,
             customerName: record.customerName,
@@ -1596,6 +1602,7 @@ async function handleRequest(req, res) {
       const gsPayload = JSON.stringify({
         action: 'createDispatch',
         dispatchId: record.dispatchId,
+        orderNumber: record.orderNumber || '',
         orderDate: record.orderDate || '',
         trackingNumber: record.trackingNumber || record.connote || '',
         customerName: record.customerName || '',
