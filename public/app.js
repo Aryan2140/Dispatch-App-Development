@@ -99,7 +99,11 @@
       'resetFormBtn',
       'submitDispatchBtn',
       'historySearchInput',
+      'syncHistoryBtn',
       'dispatchesListContainer',
+      'confirmDeleteModal',
+      'confirmDeleteMsg',
+      'confirmDeleteBtn',
       'addProductForm',
       'newProdSku',
       'newProdCategory',
@@ -537,8 +541,10 @@
     els.dispatchForm.addEventListener('submit', handleSubmitDispatch);
     els.resetFormBtn.addEventListener('click', () => resetDispatchForm(true));
 
-    // Search History
-    els.historySearchInput.addEventListener('input', debounce(loadDispatches, 180));
+    // Search History & Sync
+    els.historySearchInput.addEventListener('input', debounce(() => loadDispatches(false), 180));
+    els.syncHistoryBtn.addEventListener('click', () => loadDispatches(true));
+    els.confirmDeleteBtn.addEventListener('click', handleConfirmDeleteDispatch);
 
     // Admin Login & Settings Actions
     els.adminLoginForm.addEventListener('submit', handleAdminLogin);
@@ -1616,20 +1622,71 @@
   // DISPATCH HISTORY
   // ==========================================================================
 
-  async function loadDispatches() {
+  async function loadDispatches(syncWithGoogle = false) {
+    const origSyncText = els.syncHistoryBtn?.textContent || 'Sync Sheet';
+    if (syncWithGoogle && els.syncHistoryBtn) {
+      els.syncHistoryBtn.disabled = true;
+      els.syncHistoryBtn.textContent = 'Syncing...';
+    }
     try {
       const q = els.historySearchInput.value.trim();
       const params = new URLSearchParams();
       if (q) params.set('q', q);
+      if (syncWithGoogle) params.set('sync', 'true');
 
       const res = await fetch(`/api/dispatches?${params.toString()}`).then((r) => r.json());
       if (!res.success) return;
 
       state.dispatches = res.dispatches || [];
-      els.historyCountBadge.textContent = String(res.total || 0);
+      if (syncWithGoogle && !res.syncedFromGoogle && state.config.googleScriptUrl) {
+        try {
+          const gsRes = await callAppsScriptGet(state.config.googleScriptUrl, {
+            action: 'search',
+            limit: '200'
+          });
+          if (gsRes && gsRes.success && Array.isArray(gsRes.dispatches)) {
+            const localById = new Map(state.dispatches.map((d) => [d.dispatchId, d]));
+            const merged = state.dispatches.filter((d) => d.syncStatus !== 'synced');
+            const seen = new Set(merged.map((d) => d.dispatchId));
+            for (const remote of gsRes.dispatches) {
+              if (!remote?.dispatchId || seen.has(remote.dispatchId)) continue;
+              seen.add(remote.dispatchId);
+              const existing = localById.get(remote.dispatchId);
+              merged.push(
+                existing
+                  ? { ...existing, syncStatus: 'synced', driveFolderUrl: remote.driveFolderUrl || existing.driveFolderUrl || '' }
+                  : {
+                      dispatchId: remote.dispatchId,
+                      timestamp: remote.timestamp || '',
+                      orderDate: remote.orderDate || '',
+                      trackingNumber: remote.trackingNumber || '',
+                      customerName: remote.customerName || '',
+                      staffName: remote.staffName || '',
+                      products: Array.isArray(remote.products) ? remote.products : [],
+                      totalQty: Number(remote.totalQty) || 0,
+                      localTrackingSlipUrl: null,
+                      localPackagingUrls: [],
+                      syncStatus: 'synced',
+                      driveFolderUrl: remote.driveFolderUrl || ''
+                    }
+              );
+            }
+            state.dispatches = merged;
+          }
+        } catch (fallbackErr) {
+          console.warn('Browser history sync fallback error:', fallbackErr);
+        }
+      }
+
+      els.historyCountBadge.textContent = String(res.total ?? state.dispatches.length);
       renderDispatchesList();
     } catch (err) {
       console.error('Failed to load dispatches:', err);
+    } finally {
+      if (syncWithGoogle && els.syncHistoryBtn) {
+        els.syncHistoryBtn.disabled = false;
+        els.syncHistoryBtn.textContent = origSyncText;
+      }
     }
   }
 
@@ -1680,6 +1737,8 @@
           ? `<a href="${escapeHtml(d.driveFolderUrl)}" target="_blank" rel="noopener" class="btn btn-xs btn-outline">Drive</a>`
           : '';
 
+        const deleteBtn = `<button type="button" class="btn btn-xs btn-outline" data-delete-id="${escapeHtml(d.dispatchId)}" data-delete-label="${escapeHtml(d.customerName || d.trackingNumber || d.dispatchId)}">Remove</button>`;
+
         return `
           <div class="history-item">
             <div class="history-top">
@@ -1693,11 +1752,7 @@
               <div><strong>Order Date:</strong> ${escapeHtml(d.orderDate || '-')} &middot; <strong>Staff:</strong> ${escapeHtml(d.staffName || d.staffMember || '-')}</div>
               <div><strong>Items (${d.totalQty || 0}):</strong> ${productsText || '-'}</div>
             </div>
-            ${
-              thumbs.length || retryBtn || driveLink
-                ? `<div class="history-thumbs">${thumbs.join('')}${driveLink}${retryBtn}</div>`
-                : ''
-            }
+            <div class="history-thumbs">${thumbs.join('')}${driveLink}${retryBtn}${deleteBtn}</div>
           </div>
         `;
       })
@@ -1706,6 +1761,15 @@
     els.dispatchesListContainer.querySelectorAll('[data-lightbox-src]').forEach((img) => {
       img.addEventListener('click', () => {
         openLightbox(img.getAttribute('data-lightbox-src'), img.getAttribute('data-lightbox-title'));
+      });
+    });
+
+    els.dispatchesListContainer.querySelectorAll('[data-delete-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        state.pendingDeleteId = btn.getAttribute('data-delete-id');
+        const label = btn.getAttribute('data-delete-label') || state.pendingDeleteId;
+        els.confirmDeleteMsg.textContent = `Remove "${label}" (${state.pendingDeleteId}) from local history and delete its row from the connected Google Sheet?`;
+        openModalDialog(els.confirmDeleteModal);
       });
     });
 
@@ -1762,6 +1826,39 @@
         }
       });
     });
+  }
+
+  async function handleConfirmDeleteDispatch() {
+    const id = state.pendingDeleteId;
+    if (!id) return;
+    const origText = els.confirmDeleteBtn.textContent;
+    els.confirmDeleteBtn.disabled = true;
+    els.confirmDeleteBtn.textContent = 'Deleting...';
+
+    try {
+      const res = await fetch(`/api/dispatches/${encodeURIComponent(id)}`, { method: 'DELETE' }).then((r) => r.json());
+      if (!res.success) throw new Error(res.error || 'Delete failed');
+
+      if (!res.sheetDeleted && res.sheetError && state.config.googleScriptUrl && isHostNetworkFailure(res.sheetError)) {
+        try {
+          await callAppsScriptPost(state.config.googleScriptUrl, {
+            action: 'deleteDispatch',
+            dispatchId: id
+          });
+        } catch (fallbackErr) {
+          console.warn('Browser delete fallback error:', fallbackErr);
+        }
+      }
+
+      state.pendingDeleteId = null;
+      closeModalDialog(els.confirmDeleteModal);
+      await loadDispatches(false);
+    } catch (err) {
+      alert('Failed to delete dispatch: ' + err.message);
+    } finally {
+      els.confirmDeleteBtn.disabled = false;
+      els.confirmDeleteBtn.textContent = origText;
+    }
   }
 
   // ==========================================================================

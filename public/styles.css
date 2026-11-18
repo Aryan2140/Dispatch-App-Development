@@ -548,6 +548,15 @@
     background: color-mix(in oklab, var(--surface-muted) 86%, var(--brand-navy));
   }
 
+  .btn-danger {
+    background: var(--err);
+    color: #ffffff;
+  }
+
+  .btn-danger:hover:not(:disabled) {
+    background: color-mix(in oklab, var(--err) 86%, #000000);
+  }
+
   .btn-surface {
     background: color-mix(in oklab, #ffffff 94%, transparent);
     color: var(--brand-navy);

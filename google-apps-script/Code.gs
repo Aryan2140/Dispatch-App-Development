@@ -427,6 +427,28 @@ function doPost(e) {
       });
     }
 
+    if (action === 'deleteDispatch') {
+      const dispatchId = String(body.dispatchId || '').trim();
+      if (!dispatchId) {
+        return jsonResponse_({ success: false, error: 'dispatchId is required.' });
+      }
+      const dispatchSheet = ss.getSheetByName(CONFIG.DISPATCH_SHEET_NAME);
+      if (!dispatchSheet || dispatchSheet.getLastRow() < 2) {
+        return jsonResponse_({ success: true, deleted: false, message: 'Dispatch sheet is empty.' });
+      }
+      const lastRow = dispatchSheet.getLastRow();
+      const ids = dispatchSheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
+      let deleted = false;
+      for (let i = ids.length - 1; i >= 0; i--) {
+        if (String(ids[i][0] || '').trim() === dispatchId) {
+          dispatchSheet.deleteRow(i + 2);
+          deleted = true;
+          break;
+        }
+      }
+      return jsonResponse_({ success: true, deleted: deleted, dispatchId: dispatchId });
+    }
+
     return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
   } catch (err) {
     return jsonResponse_({ success: false, error: err.toString() });
@@ -672,6 +694,10 @@ function searchDispatches_(ss, query, limit) {
   for (let i = values.length - 1; i >= 0; i--) {
     const r = values[i];
     if (!query || r.join(' ').toLowerCase().indexOf(query) !== -1) {
+      let parsedProducts = [];
+      try {
+        parsedProducts = JSON.parse(r[13] || '[]');
+      } catch (e) {}
       results.push({
         dispatchId: r[0],
         timestamp: r[1],
@@ -681,7 +707,8 @@ function searchDispatches_(ss, query, limit) {
         productsSummary: r[5],
         totalQty: Number(r[6]) || 0,
         staffName: r[7],
-        driveFolderUrl: r[12]
+        driveFolderUrl: r[12],
+        products: Array.isArray(parsedProducts) ? parsedProducts : []
       });
       if (results.length >= limit) break;
     }

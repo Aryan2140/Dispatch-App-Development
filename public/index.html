@@ -402,6 +402,7 @@
                 spellcheck="false"
                 enterkeyhint="search"
               />
+              <button type="button" id="syncHistoryBtn" class="btn btn-brand btn-sm">Sync Sheet</button>
               <a href="/api/dispatches/export.csv" class="btn btn-outline btn-sm">Export CSV</a>
             </div>
           </search>
@@ -721,6 +722,27 @@
       </div>
       <div class="modal-body center-col">
         <img id="lightboxImg" src="" alt="Full resolution preview" class="lightbox-img" />
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- CONFIRM DELETE DISPATCH MODAL (Native <dialog>)                      -->
+  <!-- ==================================================================== -->
+  <dialog id="confirmDeleteModal" class="native-modal" aria-labelledby="confirmDeleteTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="confirmDeleteTitle">Remove Dispatch?</h2>
+        <button type="button" class="modal-close" data-close-modal="confirmDeleteModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body stack">
+        <p id="confirmDeleteMsg" class="card-sub">This will remove the dispatch from local history and delete its row from the connected Google Sheet.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline btn-sm" data-close-modal="confirmDeleteModal" autofocus>Cancel</button>
+        <button type="button" id="confirmDeleteBtn" class="btn btn-danger btn-sm">Confirm Delete</button>
       </div>
     </div>
   </dialog>

@@ -1248,12 +1248,76 @@ async function handleRequest(req, res) {
       });
     }
 
-    // 7. Dispatches (GET Search / POST Create / CSV Export / Retry Sync)
+    // 7. Dispatches (GET Search / Sync / POST Create / DELETE / CSV Export / Retry Sync)
     if (pathname === '/api/dispatches' && req.method === 'GET') {
       const q = (parsedUrl.searchParams.get('q') || '').toLowerCase().trim();
       const syncFilter = (parsedUrl.searchParams.get('syncStatus') || '').toLowerCase().trim();
+      const shouldSync = parsedUrl.searchParams.get('sync') === 'true';
 
-      const dispatches = readJsonFile(DISPATCHES_FILE, []);
+      let dispatches = readJsonFile(DISPATCHES_FILE, []);
+      let syncedFromGoogle = false;
+
+      if (shouldSync) {
+        const config = getConfig();
+        if (config.googleScriptUrl) {
+          try {
+            const targetUrl = `${config.googleScriptUrl}${config.googleScriptUrl.includes('?') ? '&' : '?'}action=search&limit=200`;
+            const gsRes = await fetchWithRedirects(targetUrl, { method: 'GET', timeout: 25000 });
+            if (gsRes.json && gsRes.json.success && Array.isArray(gsRes.json.dispatches)) {
+              const localById = new Map(dispatches.map((d) => [d.dispatchId, d]));
+              const merged = [];
+              const seen = new Set();
+
+              // Keep local pending_sync / local_only records at the top
+              for (const local of dispatches) {
+                if (local.syncStatus !== 'synced') {
+                  merged.push(local);
+                  seen.add(local.dispatchId);
+                }
+              }
+
+              // Add/update synced records from Google Sheet
+              for (const remote of gsRes.json.dispatches) {
+                if (!remote || !remote.dispatchId || seen.has(remote.dispatchId)) continue;
+                seen.add(remote.dispatchId);
+                const existing = localById.get(remote.dispatchId);
+                if (existing) {
+                  merged.push({
+                    ...existing,
+                    syncStatus: 'synced',
+                    syncError: null,
+                    driveFolderUrl: remote.driveFolderUrl || existing.driveFolderUrl || ''
+                  });
+                } else {
+                  merged.push({
+                    dispatchId: remote.dispatchId,
+                    timestamp: remote.timestamp || '',
+                    createdAtIso: '',
+                    orderDate: remote.orderDate || '',
+                    trackingNumber: remote.trackingNumber || '',
+                    customerName: remote.customerName || '',
+                    staffName: remote.staffName || '',
+                    products: Array.isArray(remote.products) ? remote.products : [],
+                    totalQty: Number(remote.totalQty) || 0,
+                    localTrackingSlipUrl: null,
+                    localPackagingUrls: [],
+                    syncStatus: 'synced',
+                    syncError: null,
+                    driveFolderUrl: remote.driveFolderUrl || ''
+                  });
+                }
+              }
+
+              dispatches = merged;
+              writeJsonFile(DISPATCHES_FILE, dispatches);
+              syncedFromGoogle = true;
+            }
+          } catch (err) {
+            console.warn('Dispatches sync warning:', err.message);
+          }
+        }
+      }
+
       const filtered = dispatches.filter((d) => {
         if (syncFilter && (d.syncStatus || '').toLowerCase() !== syncFilter) return false;
         if (!q) return true;
@@ -1277,6 +1341,7 @@ async function handleRequest(req, res) {
 
       return sendJson(res, 200, {
         success: true,
+        syncedFromGoogle,
         total: dispatches.length,
         count: filtered.length,
         dispatches: filtered
@@ -1449,6 +1514,59 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, {
         success: true,
         dispatch: record
+      });
+    }
+
+    const deleteMatch = pathname.match(/^\/api\/dispatches\/([^/]+)$/);
+    if (deleteMatch && req.method === 'DELETE') {
+      const targetId = decodeURIComponent(deleteMatch[1]);
+      const dispatches = readJsonFile(DISPATCHES_FILE, []);
+      const idx = dispatches.findIndex((d) => d.dispatchId === targetId);
+      if (idx === -1) {
+        return sendJson(res, 404, { success: false, error: 'Dispatch not found.' });
+      }
+
+      dispatches.splice(idx, 1);
+      writeJsonFile(DISPATCHES_FILE, dispatches);
+
+      // Clean up local uploaded photo folder if it exists
+      try {
+        const folder = path.join(UPLOADS_DIR, path.basename(targetId));
+        if (fs.existsSync(folder)) {
+          fs.rmSync(folder, { recursive: true, force: true });
+        }
+      } catch (e) {}
+
+      const config = getConfig();
+      let sheetDeleted = false;
+      let sheetError = null;
+      if (config.googleScriptUrl) {
+        try {
+          const gsPayload = JSON.stringify({ action: 'deleteDispatch', dispatchId: targetId });
+          const gsRes = await fetchWithRedirects(config.googleScriptUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(gsPayload)
+            },
+            body: gsPayload,
+            timeout: 25000
+          });
+          if (gsRes.json && gsRes.json.success) {
+            sheetDeleted = true;
+          } else {
+            sheetError = gsRes.json?.error || `Sheet delete returned status ${gsRes.statusCode}`;
+          }
+        } catch (err) {
+          sheetError = err.message;
+        }
+      }
+
+      return sendJson(res, 200, {
+        success: true,
+        dispatchId: targetId,
+        sheetDeleted,
+        sheetError
       });
     }
 
