@@ -750,6 +750,7 @@
     display: flex;
     flex-direction: column;
     gap: 0.25rem;
+    min-inline-size: 0;
   }
 
   .field-group label {
@@ -770,6 +771,8 @@
   input:is([type="text"], [type="url"], [type="email"], [type="password"], [type="number"], [type="search"], [type="date"], [type="time"]),
   select {
     inline-size: 100%;
+    min-inline-size: 0;
+    max-inline-size: 100%;
     min-block-size: max(var(--target-size), 2.75rem);
     padding-block: 0.5625rem;
     padding-inline: 0.75rem;
@@ -780,6 +783,14 @@
     color: var(--ink);
     background: var(--surface);
     transition: border-color 150ms ease, box-shadow 150ms ease, background 250ms ease;
+  }
+
+  /* Prevent iOS Safari native date/time inputs from overflowing their container */
+  input:is([type="date"], [type="time"]) {
+    -webkit-appearance: none;
+    appearance: none;
+    display: block;
+    text-align: start;
   }
 
   input:focus,
