@@ -1113,8 +1113,7 @@
 
   function updateLocationReminder() {
     if (!els.locationReminderNotice || !els.productRowsContainer) return;
-    const hasPictures =
-      state.packagingImagesBase64.length > 0 || Boolean(state.trackingSlipBase64);
+    const hasPictures = state.packagingImagesBase64.length > 0;
     if (!hasPictures) {
       els.locationReminderNotice.classList.add('hidden');
       return;
