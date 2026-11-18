@@ -1017,17 +1017,143 @@ async function handleRequest(req, res) {
       return sendJson(res, 200, { success: true, code });
     }
 
+function findGitBinary() {
+  if (process.env.GIT_PATH && fs.existsSync(process.env.GIT_PATH)) {
+    return process.env.GIT_PATH;
+  }
+
+  const isWindows = process.platform === 'win32';
+  if (!isWindows) {
+    const unixPaths = ['/usr/bin/git', '/usr/local/bin/git', '/opt/homebrew/bin/git', '/bin/git'];
+    for (const p of unixPaths) {
+      if (fs.existsSync(p)) return p;
+    }
+    return 'git';
+  }
+
+  // Windows candidate paths
+  const localAppData =
+    process.env.LOCALAPPDATA ||
+    (process.env.USERPROFILE ? path.join(process.env.USERPROFILE, 'AppData', 'Local') : '');
+  const progFiles = process.env.ProgramFiles || 'C:\\Program Files';
+  const progFilesX86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)';
+  const progW64 = process.env.ProgramW6432 || 'C:\\Program Files';
+  const userProfile = process.env.USERPROFILE || '';
+
+  const candidates = [
+    path.join(progFiles, 'Git', 'cmd', 'git.exe'),
+    path.join(progFiles, 'Git', 'bin', 'git.exe'),
+    path.join(progW64, 'Git', 'cmd', 'git.exe'),
+    path.join(progW64, 'Git', 'bin', 'git.exe'),
+    path.join(progFilesX86, 'Git', 'cmd', 'git.exe'),
+    path.join(progFilesX86, 'Git', 'bin', 'git.exe'),
+    localAppData ? path.join(localAppData, 'Programs', 'Git', 'cmd', 'git.exe') : '',
+    localAppData ? path.join(localAppData, 'Programs', 'Git', 'bin', 'git.exe') : '',
+    'C:\\Git\\cmd\\git.exe',
+    'C:\\Git\\bin\\git.exe',
+    userProfile ? path.join(userProfile, 'scoop', 'shims', 'git.exe') : '',
+    'C:\\ProgramData\\chocolatey\\bin\\git.exe'
+  ].filter(Boolean);
+
+  for (const cand of candidates) {
+    try {
+      if (fs.existsSync(cand)) return cand;
+    } catch (e) {}
+  }
+
+  // Check GitHub Desktop embedded git if available
+  if (localAppData) {
+    const ghDesktop = path.join(localAppData, 'GitHubDesktop');
+    try {
+      if (fs.existsSync(ghDesktop)) {
+        const entries = fs.readdirSync(ghDesktop);
+        for (const entry of entries) {
+          if (entry.startsWith('app-')) {
+            const ghGit = path.join(ghDesktop, entry, 'resources', 'app', 'git', 'cmd', 'git.exe');
+            if (fs.existsSync(ghGit)) return ghGit;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  // Check where.exe git on Windows
+  try {
+    const { execSync } = require('child_process');
+    const out = execSync('where.exe git', { stdio: ['pipe', 'pipe', 'ignore'], timeout: 3000 })
+      .toString()
+      .trim();
+    const firstLine = out.split(/\r?\n/)[0]?.trim();
+    if (firstLine && fs.existsSync(firstLine)) {
+      return firstLine;
+    }
+  } catch (e) {}
+
+  // Check if git in current process PATH is callable
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('git.exe', ['--version'], { stdio: 'ignore', timeout: 3000 });
+    return 'git.exe';
+  } catch (e) {}
+
+  try {
+    const { execFileSync } = require('child_process');
+    execFileSync('git', ['--version'], { stdio: 'ignore', timeout: 3000 });
+    return 'git';
+  } catch (e) {}
+
+  return null;
+}
+
     if (pathname === '/api/admin/update' && req.method === 'POST') {
       if (!requireAdmin(req, res)) return;
       const body = await parseJsonBody(req);
       const shouldInstall = Boolean(body.install);
 
+      const gitDir = path.join(__dirname, '.git');
+      if (!fs.existsSync(gitDir)) {
+        return sendJson(res, 400, {
+          success: false,
+          error:
+            'This folder was copied without Git repository data (.git directory is missing). To enable one-click updates via GitHub, ensure the project was cloned using Git.'
+        });
+      }
+
+      const gitBin = findGitBinary();
+      if (!gitBin) {
+        return sendJson(res, 500, {
+          success: false,
+          error:
+            'Git is not installed or not in PATH on this Windows host. Please install Git for Windows from https://git-scm.com/download/win (or run "winget install Git.Git" in PowerShell), then restart the dispatch app.'
+        });
+      }
+
+      const gitBinDir = path.dirname(gitBin);
+      const spawnEnv = { ...process.env };
+      if (process.platform === 'win32' && gitBinDir && path.isAbsolute(gitBin)) {
+        spawnEnv.PATH = `${gitBinDir};${spawnEnv.PATH || ''}`;
+      }
+
       const runGit = (args) =>
         new Promise((resolve, reject) => {
-          execFile('git', args, { cwd: __dirname, timeout: 25000 }, (err, stdout, stderr) => {
-            if (err) return reject(new Error((stderr || stdout || err.message).trim()));
-            resolve((stdout || '').trim());
-          });
+          execFile(
+            gitBin,
+            args,
+            { cwd: __dirname, env: spawnEnv, timeout: 35000, windowsHide: true },
+            (err, stdout, stderr) => {
+              if (err) {
+                if (err.code === 'ENOENT' || String(err.message || '').includes('ENOENT')) {
+                  return reject(
+                    new Error(
+                      'Git executable could not be found or launched. Please install Git for Windows (https://git-scm.com/download/win) and restart the server.'
+                    )
+                  );
+                }
+                return reject(new Error((stderr || stdout || err.message).trim()));
+              }
+              resolve((stdout || '').trim());
+            }
+          );
         });
 
       try {
@@ -1068,7 +1194,7 @@ async function handleRequest(req, res) {
         sendJson(res, 200, {
           success: true,
           updated: true,
-          message: `Updated (${pullOut.split('\n')[0] || 'OK'}). Restarting server...`
+          message: `Updated successfully (${pullOut.split('\n')[0] || 'OK'}). Restarting server...`
         });
 
         setTimeout(() => {
@@ -1076,7 +1202,8 @@ async function handleRequest(req, res) {
             const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
               cwd: __dirname,
               detached: true,
-              stdio: 'ignore'
+              stdio: 'ignore',
+              windowsHide: true
             });
             child.unref();
           } catch (e) {}
