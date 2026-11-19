@@ -35,6 +35,14 @@ if %ERRORLEVEL% NEQ 0 (
     echo.
 )
 
+if not exist "%~dp0node_modules\tesseract.js" (
+    echo Installing required offline OCR dependencies...
+    pushd "%~dp0"
+    call npm install --no-audit --no-fund
+    popd
+    echo.
+)
+
 echo Starting Aimex Dispatch Server on port 3000...
 echo Opening http://localhost:3000 in your default browser...
 echo.

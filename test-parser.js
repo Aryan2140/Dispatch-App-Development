@@ -131,4 +131,138 @@ const res8 = parser.parseTrackingSlipText(headlessAusPost, 85);
 console.log('Test 8 (Obscured header pattern rescue):', res8);
 assert.strictEqual(res8.trackingNumber, '39BCX500052901000931505');
 
+// Test 9: CouriersPlease Amazon label (with column tab separation + DataMatrix barcode payload noise)
+const cpAmazonText = [
+  'UNDELIVERABLE ADDRESS:\tRESIDENTIAL',
+  'Aimex Australia',
+  '26/191 McCredie Road\tCouriersPlease',
+  'SMITHFIELD NSW 2164',
+  'Australia\tPkg 1 of 1',
+  'SHIP TO:',
+  'JAKE DURY\t4.86 kg. 43.1 * 27.8 * 27.4',
+  '60 YARRA VALLEY BOULEVARD\tLEAVE IN A SAFE PLACE',
+  'Destination : VIC',
+  'CHIRNSIDE PARK 3116 AUSTRALIA\tOrder Id: 503-0624319-3869418',
+  'CPBHZST1575833',
+  'D4A270',
+  'BARCODE_PAYLOAD: SDrlMx0wVr_001_v'
+].join('\n');
+const res9 = parser.parseTrackingSlipText(cpAmazonText, 90);
+console.log('Test 9 (CouriersPlease Amazon):', res9);
+assert.strictEqual(res9.customerName, 'JAKE DURY');
+assert.strictEqual(res9.trackingNumber, 'CPBHZST1575833');
+
+// Test 10: CouriersPlease Amazon with inverted same-line header "JAKE DURY   SHIP TO:"
+const cpAmazonInverted = [
+  'UNDELIVERABLE ADDRESS: Aimex Australia\tRESIDENTIAL',
+  'SMITHFIELD NSW 2164 26/191 McCredie Road',
+  'JAKE DURY   SHIP TO:\t4.86 kg. 43.1 * 27.8 * 27.4',
+  'Destination : VIC   60 YARRA VALLEY BOULEVARD\tLEAVE IN A SAFE PLACE',
+  'CHIRNSIDE PARK 3116 AUSTRALIA\tOrder Id: 503-0624319-3869418',
+  'CPBHZST1575833',
+  'D4A270',
+  'BARCODE_PAYLOAD: SDrlMx0wVr_001_v'
+].join('\n');
+const res10 = parser.parseTrackingSlipText(cpAmazonInverted, 90);
+console.log('Test 10 (CouriersPlease Amazon inverted SHIP TO):', res10);
+assert.strictEqual(res10.customerName, 'JAKE DURY');
+assert.strictEqual(res10.trackingNumber, 'CPBHZST1575833');
+
+// Test 11: Noisy Tesseract on Amazon label ("lh mn" garbage + "SHTMIED" + "SHIP 10:" + "CPBHZSTI575833")
+const noisyTesseractAmazon = `
+lh      mn
+26/191 McCredie Road                      Er
+SHTMIED NSW 2164
+ralia
+SHIP 10:                       Pkg 1 of 1
+JAKE DURY
+60 YARRA VALLEY BOULEVARD         Liha, Ke
+Destination : VIC                        JRL EAVEINAL
+CHIRNSIDE PARK 3116 AUSTRALIA   Order Id: 503-062
+CPBHZSTI575833                    |
+D4A270
+`;
+const res11 = parser.parseTrackingSlipText(noisyTesseractAmazon, 59);
+console.log('Test 11 (Noisy Tesseract Amazon):', res11);
+assert.strictEqual(res11.customerName, 'JAKE DURY');
+assert.strictEqual(res11.trackingNumber, 'CPBHZST1575833');
+
+// Test 12: Australia Post International S10 + Multi-carrier suite (StarTrack, Sendle, Toll/TGE, TNT, DHL, Allied, Direct Freight)
+const intlAusPost = `
+Australia Post Express International
+DELIVER TO: Daniel Nguyen
+14 Collins Street
+MELBOURNE VIC 3000
+Tracking No: EB123456789AU
+`;
+const res12a = parser.parseTrackingSlipText(intlAusPost, 90);
+assert.strictEqual(res12a.customerName, 'Daniel Nguyen');
+assert.strictEqual(res12a.trackingNumber, 'EB123456789AU');
+
+const starTrackLabel = `
+StarTrack Express
+Consignment: 2ATZ12345678
+Deliver To: Emma Watson
+55 George Street
+BRISBANE QLD 4000
+`;
+const res12b = parser.parseTrackingSlipText(starTrackLabel, 90);
+assert.strictEqual(res12b.customerName, 'Emma Watson');
+assert.strictEqual(res12b.trackingNumber, '2ATZ12345678');
+
+const sendleLabel = `
+Sendle
+Sendle Ref: S3NDL9
+To: Olivia Brown
+99 Harbour Esplanade
+DOCKLANDS VIC 3008
+`;
+const res12c = parser.parseTrackingSlipText(sendleLabel, 90);
+assert.strictEqual(res12c.customerName, 'Olivia Brown');
+assert.strictEqual(res12c.trackingNumber, 'S3NDL9');
+
+const tollTgeLabel = `
+Team Global Express
+Connote: 887766554433
+Consignee: Lucas Miller
+101 St Georges Terrace
+PERTH WA 6000
+`;
+const res12d = parser.parseTrackingSlipText(tollTgeLabel, 90);
+assert.strictEqual(res12d.customerName, 'Lucas Miller');
+assert.strictEqual(res12d.trackingNumber, '887766554433');
+
+const tntFedexDhl = `
+DHL Express
+Waybill: JD014600001234567890
+Recipient: Hannah Kim
+200 Hindley Street
+ADELAIDE SA 5000
+`;
+const res12e = parser.parseTrackingSlipText(tntFedexDhl, 90);
+assert.strictEqual(res12e.customerName, 'Hannah Kim');
+assert.strictEqual(res12e.trackingNumber, 'JD014600001234567890');
+
+const tntLabel = `
+TNT Express
+Consignment No: GE123456789AU
+Deliver To: Noah Wilson
+75 Salamanca Place
+HOBART TAS 7000
+`;
+const res12f = parser.parseTrackingSlipText(tntLabel, 90);
+assert.strictEqual(res12f.customerName, 'Noah Wilson');
+assert.strictEqual(res12f.trackingNumber, 'GE123456789AU');
+
+const directAllied = `
+Direct Freight Express
+Consignment Note: DFE998877665
+Receiver: Ethan Davis
+12 Northbourne Ave
+CANBERRA ACT 2601
+`;
+const res12g = parser.parseTrackingSlipText(directAllied, 90);
+assert.strictEqual(res12g.customerName, 'Ethan Davis');
+assert.strictEqual(res12g.trackingNumber, 'DFE998877665');
+
 console.log('\nAll parser tests passed!');

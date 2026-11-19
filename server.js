@@ -60,7 +60,7 @@ const DEFAULT_CONFIG = {
   googleSheetUrl: '',
   ocrMode: 'auto', // 'auto' | 'host' | 'gemini'
   geminiApiKey: '',
-  geminiModel: 'gemini-2.5-flash',
+  geminiModel: 'auto',
   adminPasswordHash: hashPassword(DEFAULT_ADMIN_PASSWORD),
   dailyEmail: {
     enabled: true,
@@ -106,6 +106,10 @@ function getConfig() {
   }
   if (!cfg.dailyEmail || typeof cfg.dailyEmail !== 'object') {
     cfg.dailyEmail = { ...DEFAULT_CONFIG.dailyEmail };
+    changed = true;
+  }
+  if (!cfg.geminiModel || cfg.geminiModel === 'gemini-2.5-flash') {
+    cfg.geminiModel = 'auto';
     changed = true;
   }
   if (changed) writeJsonFile(CONFIG_FILE, cfg);
@@ -418,6 +422,18 @@ function startDailyEmailScheduler() {
 let winOcrProc = null;
 let winOcrQueue = Promise.resolve();
 
+function getWindowsPowerShellPath() {
+  const sysPs = path.join(
+    process.env.SystemRoot || 'C:\\Windows',
+    'System32',
+    'WindowsPowerShell',
+    'v1.0',
+    'powershell.exe'
+  );
+  if (fs.existsSync(sysPs)) return sysPs;
+  return 'powershell.exe';
+}
+
 function ensureWindowsOcrProcess() {
   if (winOcrProc && !winOcrProc.killed && winOcrProc.exitCode === null) {
     return winOcrProc;
@@ -426,9 +442,9 @@ function ensureWindowsOcrProcess() {
   if (!fs.existsSync(psScriptPath)) return null;
 
   winOcrProc = spawn(
-    'powershell.exe',
+    getWindowsPowerShellPath(),
     ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', psScriptPath],
-    { stdio: ['pipe', 'pipe', 'pipe'] }
+    { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true }
   );
   winOcrProc.stderr.on('data', (d) => {
     const msg = d.toString('utf8').trim();
@@ -468,7 +484,12 @@ function runWindowsOcrOnFile(imgPath) {
           if (markerIdx !== -1) {
             const output = buffer.slice(0, markerIdx).replace(/\r/g, '').trim();
             cleanup();
-            if (!output || output.includes('<<AIMEX_OCR_ERR>>')) {
+            if (output.includes('<<AIMEX_OCR_NO_LANG>>')) {
+              console.warn(
+                '[Windows OCR] No OCR language pack installed. Install English OCR on Windows 10 via PowerShell (Admin): Add-WindowsCapability -Online -Name Language.OCR~~~en-US~0.0.1.0'
+              );
+              resolve(null);
+            } else if (!output || output.includes('<<AIMEX_OCR_ERR>>')) {
               resolve(null);
             } else {
               resolve(output);
@@ -536,7 +557,7 @@ function getHostTesseractWorker() {
       };
       const worker = await createWorker('eng', 1, workerOpts);
       await worker.setParameters({
-        tessedit_pageseg_mode: '6',
+        tessedit_pageseg_mode: '3',
         preserve_interword_spaces: '1'
       });
       return worker;
@@ -571,24 +592,236 @@ function runHostTesseractOnFile(imgPath) {
   return task;
 }
 
-async function extractLabelWithGemini(imageBase64, apiKey, modelName = 'gemini-2.5-flash') {
-  let mimeType = 'image/jpeg';
-  let cleanBase64 = imageBase64;
-  if (imageBase64.includes('base64,')) {
-    const parts = imageBase64.split('base64,');
-    const mimeMatch = parts[0].match(/data:(.*?);/);
-    if (mimeMatch && mimeMatch[1]) mimeType = mimeMatch[1];
-    cleanBase64 = parts[1];
+const GEMINI_SEED_MODELS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-flash-lite-latest'];
+const GEMINI_MODEL_CACHE_MS = 6 * 60 * 60 * 1000; // 6 hours
+
+const geminiRuntimeState = {
+  apiKeyHash: '',
+  cachedModels: [],
+  modelsFetchedAt: 0,
+  activeModel: '',
+  exhaustedModels: new Map(), // modelId -> resumeTimestampMs
+  pausedUntil: 0,
+  pauseReason: '',
+  lastError: ''
+};
+
+function resetGeminiRuntimeState() {
+  geminiRuntimeState.apiKeyHash = '';
+  geminiRuntimeState.cachedModels = [];
+  geminiRuntimeState.modelsFetchedAt = 0;
+  geminiRuntimeState.activeModel = '';
+  geminiRuntimeState.exhaustedModels.clear();
+  geminiRuntimeState.pausedUntil = 0;
+  geminiRuntimeState.pauseReason = '';
+  geminiRuntimeState.lastError = '';
+}
+
+function syncGeminiStateForKey(apiKey) {
+  const keyHash = crypto.createHash('sha256').update(String(apiKey || '')).digest('hex').slice(0, 16);
+  if (geminiRuntimeState.apiKeyHash !== keyHash) {
+    resetGeminiRuntimeState();
+    geminiRuntimeState.apiKeyHash = keyHash;
+  }
+}
+
+function rankGeminiModel(modelObj) {
+  const fullName = String(modelObj?.name || '').trim();
+  const id = fullName.replace(/^models\//i, '');
+  const methods = Array.isArray(modelObj?.supportedGenerationMethods)
+    ? modelObj.supportedGenerationMethods
+    : [];
+
+  if (!id || !/^gemini-/i.test(id)) return null;
+  if (methods.length > 0 && !methods.includes('generateContent')) return null;
+  if (/embedding|aqa|imagen|veo|tts|audio|live|robotics|computer-use|deep-research|\bnano\b/i.test(id)) {
+    return null;
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelName)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const lower = id.toLowerCase();
+  const isLite = /lite/i.test(lower);
+  const isThinking = /thinking/i.test(lower);
+  const isFlash = /flash/i.test(lower);
+  const isLatestAlias = /-latest$/i.test(lower);
+  const isPreviewOrExp = /(?:preview|exp|experimental|0\d{2})/i.test(lower);
+
+  const verMatch = lower.match(/gemini-(\d+)(?:\.(\d+))?/);
+  const major = verMatch ? Number(verMatch[1]) || 0 : 0;
+  const minor = verMatch && verMatch[2] ? Number(verMatch[2]) || 0 : 0;
+
+  // Tier priority (higher is better):
+  // 4 = Standard Flash (rolling latest or newest version)
+  // 3 = Flash-Lite (fast, high free-tier quota fallback bucket)
+  // 2 = Other Flash (thinking, etc.)
+  // 1 = Pro / other general Gemini vision model
+  let tier = 1;
+  if (isFlash && !isLite && !isThinking) tier = 4;
+  else if (isFlash && isLite) tier = 3;
+  else if (isFlash) tier = 2;
+
+  return {
+    id,
+    tier,
+    major,
+    minor,
+    isLatestAlias: isLatestAlias ? 1 : 0,
+    isStable: isPreviewOrExp ? 0 : 1
+  };
+}
+
+function sortRankedGeminiModels(models) {
+  return models
+    .slice()
+    .sort((a, b) => {
+      if (b.tier !== a.tier) return b.tier - a.tier;
+      if (b.isLatestAlias !== a.isLatestAlias) return b.isLatestAlias - a.isLatestAlias;
+      if (b.major !== a.major) return b.major - a.major;
+      if (b.minor !== a.minor) return b.minor - a.minor;
+      if (b.isStable !== a.isStable) return b.isStable - a.isStable;
+      return a.id.localeCompare(b.id);
+    });
+}
+
+async function discoverGeminiModels(apiKey, forceRefresh = false) {
+  syncGeminiStateForKey(apiKey);
+  const now = Date.now();
+  if (
+    !forceRefresh &&
+    geminiRuntimeState.cachedModels.length > 0 &&
+    now - geminiRuntimeState.modelsFetchedAt < GEMINI_MODEL_CACHE_MS
+  ) {
+    return geminiRuntimeState.cachedModels;
+  }
+
+  try {
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(apiKey)}`;
+    const res = await fetchWithRedirects(endpoint, {
+      method: 'GET',
+      headers: {
+        'x-goog-api-key': apiKey
+      },
+      timeout: 15000
+    });
+    if (res.statusCode === 200 && Array.isArray(res.json?.models)) {
+      const ranked = sortRankedGeminiModels(
+        res.json.models.map(rankGeminiModel).filter(Boolean)
+      ).map((m) => m.id);
+
+      if (ranked.length > 0) {
+        geminiRuntimeState.cachedModels = ranked;
+        geminiRuntimeState.modelsFetchedAt = now;
+        return ranked;
+      }
+    }
+  } catch (err) {
+    console.warn('[Gemini] Model discovery fallback:', err.message);
+  }
+
+  return geminiRuntimeState.cachedModels.length > 0
+    ? geminiRuntimeState.cachedModels
+    : GEMINI_SEED_MODELS.slice();
+}
+
+function isModelUnavailableError(statusCode, message) {
+  return (
+    statusCode === 404 ||
+    /no longer available|not found|not supported|deprecated|retired|invalid model/i.test(String(message || ''))
+  );
+}
+
+function extractSuggestedGeminiModel(message, failedModelId = '') {
+  const regex = /models\/(gemini-[a-z0-9.-]+)/gi;
+  let m;
+  while ((m = regex.exec(String(message || ''))) !== null) {
+    const candidate = m[1];
+    if (candidate && candidate.toLowerCase() !== String(failedModelId || '').toLowerCase()) {
+      return candidate;
+    }
+  }
+  return '';
+}
+
+function isQuotaOrBillingError(statusCode, message) {
+  return (
+    statusCode === 429 ||
+    statusCode === 402 ||
+    /resource_exhausted|quota|rate.?limit|too many requests|billing|credits?|free.?tier|limit:\s*0/i.test(
+      String(message || '')
+    )
+  );
+}
+
+function isInvalidKeyError(statusCode, message) {
+  return (
+    statusCode === 401 ||
+    /api.?key.*(?:invalid|not valid|expired)|permission_denied/i.test(String(message || ''))
+  );
+}
+
+function computeQuotaPauseDurationMs(message) {
+  const msg = String(message || '');
+  // Pure per-minute / short burst rate limit with retry countdown
+  const isDailyOrBilling = /per.?day|daily|rpd|billing|credits?|free.?tier|limit:\s*0/i.test(msg);
+  const retryMatch = msg.match(/retry\s+in\s+(\d+(?:\.\d+)?)\s*s/i);
+  if (!isDailyOrBilling && retryMatch) {
+    const waitSec = Math.max(60, Math.ceil(Number(retryMatch[1]) || 60) + 10);
+    return waitSec * 1000;
+  }
+  if (/billing|credits?|limit:\s*0/i.test(msg) && !/per.?day|rpd/i.test(msg)) {
+    // 24 hours if billing/free-tier limit is 0 or exhausted
+    return 24 * 60 * 60 * 1000;
+  }
+  // Daily free-tier limit: compute ms until next Sydney midnight (minimum 6 hours)
+  try {
+    const { timeStr } = getSydneyDateAndTime();
+    const [hh, mm] = timeStr.split(':').map(Number);
+    const minsRemaining = (24 - hh) * 60 - mm + 5;
+    return Math.max(6 * 60 * 60 * 1000, minsRemaining * 60 * 1000);
+  } catch (e) {
+    return 6 * 60 * 60 * 1000;
+  }
+}
+
+function getGeminiStatus(config) {
+  const ocrMode = config?.ocrMode || 'auto';
+  const hasKey = Boolean(config?.geminiApiKey);
+  if (!hasKey || ocrMode === 'host') {
+    return {
+      state: 'disabled',
+      activeModel: '',
+      pausedUntilIso: '',
+      reason: ocrMode === 'host' ? 'Host OCR only mode selected' : 'No Gemini API key configured'
+    };
+  }
+
+  syncGeminiStateForKey(config.geminiApiKey);
+  const now = Date.now();
+  if (geminiRuntimeState.pausedUntil > now) {
+    return {
+      state: 'fallback_quota',
+      activeModel: geminiRuntimeState.activeModel || '',
+      pausedUntilIso: new Date(geminiRuntimeState.pausedUntil).toISOString(),
+      reason: geminiRuntimeState.pauseReason || 'Gemini free credits/quota exhausted — using Host OCR'
+    };
+  }
+
+  return {
+    state: 'active',
+    activeModel: geminiRuntimeState.activeModel || (config.geminiModel && config.geminiModel !== 'auto' ? config.geminiModel : 'auto'),
+    pausedUntilIso: '',
+    reason: geminiRuntimeState.lastError ? '' : 'Ready'
+  };
+}
+
+async function callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId) {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
   const prompt = `Extract shipping label details for Aimex Australia Pty Ltd.
-IMPORTANT: Do NOT extract the sender ("From: Aimex Australia Pty Ltd") as the customerName. Always extract the "To:" recipient.
-Return a JSON object with these exact keys:
-- "customerName": string (recipient full name or company name after "To:" / "Deliver To:")
-- "trackingNumber": string (the Connote / Tracking number / Consignment number, e.g. "CPCTOZE0000179" — prefer the Connote at top over item barcode if both exist)
-- "orderDate": string (YYYY-MM-DD if an order or dispatch date is printed on the label, otherwise "")`;
+IMPORTANT RULES:
+1. "customerName": Extract the RECIPIENT / "Deliver To:" / "Ship To:" / "To:" full name or company name. NEVER extract the sender ("From: Aimex Australia Pty Ltd", "Undeliverable Address: Aimex Australia", "Smithfield NSW 2164"). Ignore package weights ("4.86 kg."), "Pkg 1 of 1", "RESIDENTIAL", or phone numbers.
+2. "trackingNumber": Extract the primary Tracking / Connote / Consignment / AP Article Id number across any carrier (Australia Post eParcel "AP Article Id" e.g. "39BCX500052901000931505" preferred over short "Con No", CouriersPlease Connote e.g. "CPCTOZE0000179" or standalone "CPBHZST1575833", Aramex/Fastway, StarTrack, Sendle, Toll/TGE, TNT, FedEx, DHL, Direct Freight, Allied). Do NOT use depot codes (like "D4A270", "T4A259"), Amazon "Order Id" (like "503-0624319-3869418"), or QR side text.
+3. "orderDate": YYYY-MM-DD if an order or dispatch date is printed on the label, otherwise "".
+Return ONLY a valid JSON object with keys: "customerName", "trackingNumber", "orderDate".`;
 
   const payload = JSON.stringify({
     contents: [
@@ -609,6 +842,7 @@ Return a JSON object with these exact keys:
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
       'Content-Length': Buffer.byteLength(payload)
     },
     body: payload,
@@ -617,45 +851,171 @@ Return a JSON object with these exact keys:
 
   if (response.statusCode !== 200 || !response.json) {
     const errMsg = response.json?.error?.message || response.rawBody || `HTTP ${response.statusCode}`;
-    throw new Error(`Gemini API error: ${errMsg}`);
+    const err = new Error(`Gemini API error: ${errMsg}`);
+    err.statusCode = response.statusCode;
+    throw err;
   }
 
-  const candidateText = response.json?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
-  const parsed = JSON.parse(candidateText);
+  let candidateText = response.json?.candidates?.[0]?.content?.parts?.[0]?.text || '{}';
+  candidateText = String(candidateText)
+    .replace(/^```(?:json)?\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim();
+  const parsed = JSON.parse(candidateText || '{}');
   return {
     customerName: String(parsed.customerName || '').trim(),
     trackingNumber: String(parsed.trackingNumber || '').trim(),
-    orderDate: String(parsed.orderDate || '').trim()
+    orderDate: String(parsed.orderDate || '').trim(),
+    modelUsed: modelId
   };
+}
+
+async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'auto') {
+  syncGeminiStateForKey(apiKey);
+  const now = Date.now();
+  if (geminiRuntimeState.pausedUntil > now) {
+    const quotaErr = new Error(geminiRuntimeState.pauseReason || 'Gemini free credits/quota paused — using Host OCR');
+    quotaErr.isQuotaPaused = true;
+    throw quotaErr;
+  }
+
+  let mimeType = 'image/jpeg';
+  let cleanBase64 = imageBase64;
+  if (imageBase64.includes('base64,')) {
+    const parts = imageBase64.split('base64,');
+    const mimeMatch = parts[0].match(/data:(.*?);/);
+    if (mimeMatch && mimeMatch[1]) mimeType = mimeMatch[1];
+    cleanBase64 = parts[1];
+  }
+
+  // Prune expired model cooldowns
+  for (const [mId, untilMs] of geminiRuntimeState.exhaustedModels.entries()) {
+    if (untilMs <= now) geminiRuntimeState.exhaustedModels.delete(mId);
+  }
+
+  const discovered = await discoverGeminiModels(apiKey, false);
+  const queue = [];
+  const seen = new Set();
+  const addCandidate = (mId, toFront = false) => {
+    const clean = String(mId || '').replace(/^models\//i, '').trim();
+    if (!clean || clean.toLowerCase() === 'auto' || seen.has(clean)) return;
+    if ((geminiRuntimeState.exhaustedModels.get(clean) || 0) > Date.now()) return;
+    seen.add(clean);
+    if (toFront) queue.unshift(clean);
+    else queue.push(clean);
+  };
+
+  if (configuredModel && configuredModel !== 'auto') {
+    addCandidate(configuredModel);
+  }
+  if (geminiRuntimeState.activeModel) {
+    addCandidate(geminiRuntimeState.activeModel);
+  }
+  for (const mId of discovered) {
+    addCandidate(mId);
+  }
+
+  let lastErr = null;
+  let didForceRefresh = false;
+  let attempts = 0;
+
+  while (queue.length > 0 && attempts < 4) {
+    const modelId = queue.shift();
+    attempts++;
+    try {
+      const res = await callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId);
+      geminiRuntimeState.activeModel = modelId;
+      geminiRuntimeState.pausedUntil = 0;
+      geminiRuntimeState.pauseReason = '';
+      geminiRuntimeState.lastError = '';
+      return res;
+    } catch (err) {
+      lastErr = err;
+      const status = Number(err.statusCode) || 0;
+      const msg = err.message || '';
+
+      if (isInvalidKeyError(status, msg)) {
+        geminiRuntimeState.pausedUntil = Date.now() + 60 * 60 * 1000;
+        geminiRuntimeState.pauseReason = 'Invalid Gemini API key — reverted to Host OCR';
+        geminiRuntimeState.lastError = msg;
+        throw err;
+      }
+
+      if (isModelUnavailableError(status, msg)) {
+        if (geminiRuntimeState.activeModel === modelId) geminiRuntimeState.activeModel = '';
+        geminiRuntimeState.cachedModels = geminiRuntimeState.cachedModels.filter((m) => m !== modelId);
+
+        const suggested = extractSuggestedGeminiModel(msg, modelId);
+        if (suggested) addCandidate(suggested, true);
+
+        if (!didForceRefresh) {
+          didForceRefresh = true;
+          const refreshed = await discoverGeminiModels(apiKey, true);
+          for (const mId of refreshed) addCandidate(mId);
+        }
+        continue;
+      }
+
+      if (isQuotaOrBillingError(status, msg)) {
+        const waitMs = computeQuotaPauseDurationMs(msg);
+        geminiRuntimeState.exhaustedModels.set(modelId, Date.now() + waitMs);
+        continue; // Try backup tier (e.g. flash-lite free bucket)
+      }
+
+      // Transient or parse error — don't burn retries
+      geminiRuntimeState.lastError = msg;
+      throw err;
+    }
+  }
+
+  // If every candidate exhausted quota/billing, pause Gemini automatically so Host OCR takes over instantly
+  if (lastErr && isQuotaOrBillingError(Number(lastErr.statusCode) || 0, lastErr.message)) {
+    const waitMs = computeQuotaPauseDurationMs(lastErr.message);
+    geminiRuntimeState.pausedUntil = Date.now() + waitMs;
+    geminiRuntimeState.pauseReason = 'Gemini free credits/quota exhausted — reverted to regular Host OCR';
+    geminiRuntimeState.lastError = lastErr.message;
+  }
+
+  throw lastErr || new Error('No compatible Gemini vision model available');
 }
 
 /**
  * Runs Host-Side OCR on a base64 JPEG image.
  * Writes temp image ONLY for the duration of OCR processing and deletes it immediately after.
  */
-async function processImageOcrOnHost(imageBase64, config) {
+async function processImageOcrOnHost(imageBase64, config, options = {}) {
   const useGemini =
-    config.ocrMode === 'gemini' ||
-    (config.ocrMode === 'auto' && Boolean(config.geminiApiKey));
+    !options.skipGemini &&
+    Boolean(config.geminiApiKey) &&
+    (config.ocrMode === 'gemini' || config.ocrMode === 'auto');
 
-  if (useGemini && config.geminiApiKey) {
+  let geminiFallbackReason = '';
+
+  if (useGemini) {
     try {
       const gRes = await extractLabelWithGemini(
         imageBase64,
         config.geminiApiKey,
-        config.geminiModel || 'gemini-2.5-flash'
+        config.geminiModel || 'auto'
       );
       return {
-        engine: 'gemini',
+        engine: `gemini (${gRes.modelUsed})`,
         extracted: {
-          ...gRes,
+          customerName: gRes.customerName,
           customerNameCertainty: gRes.customerName ? 96 : 0,
-          trackingNumberCertainty: gRes.trackingNumber ? 96 : 0
+          trackingNumber: gRes.trackingNumber,
+          trackingNumberCertainty: gRes.trackingNumber ? 96 : 0,
+          orderDate: gRes.orderDate
         },
-        rawText: ''
+        rawText: '',
+        geminiFallbackReason: '',
+        geminiStatus: getGeminiStatus(config)
       };
     } catch (err) {
-      console.warn('Gemini OCR error, falling back to host OCR:', err.message);
+      geminiFallbackReason = geminiRuntimeState.pauseReason || err.message || 'Gemini unavailable';
+      if (!err.isQuotaPaused) {
+        console.warn('Gemini OCR error, falling back to host OCR:', err.message);
+      }
     }
   }
 
@@ -732,7 +1092,9 @@ async function processImageOcrOnHost(imageBase64, config) {
         trackingNumberCertainty: 0,
         orderDate: ''
       },
-      rawText: rawText || ''
+      rawText: rawText || '',
+      geminiFallbackReason,
+      geminiStatus: getGeminiStatus(config)
     };
   } finally {
     try {
@@ -864,6 +1226,7 @@ async function handleRequest(req, res) {
         googleConnected: Boolean(config.googleScriptUrl),
         googleSheetUrl: config.googleSheetUrl || '',
         geminiConfigured: Boolean(config.geminiApiKey),
+        geminiStatus: getGeminiStatus(config),
         ocrMode: config.ocrMode || 'auto',
         totalLocalDispatches: dispatches.length,
         pendingSyncCount: dispatches.filter((d) => d.syncStatus !== 'synced').length
@@ -880,7 +1243,8 @@ async function handleRequest(req, res) {
           googleScriptUrl: config.googleScriptUrl || '',
           googleSheetUrl: config.googleSheetUrl || '',
           ocrMode: config.ocrMode || 'auto',
-          hasGeminiApiKey: Boolean(config.geminiApiKey)
+          hasGeminiApiKey: Boolean(config.geminiApiKey),
+          geminiStatus: getGeminiStatus(config)
         }
       });
     }
@@ -915,6 +1279,7 @@ async function handleRequest(req, res) {
             ? config.geminiApiKey.slice(0, 6) + '••••' + config.geminiApiKey.slice(-4)
             : '',
           hasGeminiApiKey: Boolean(config.geminiApiKey),
+          geminiStatus: getGeminiStatus(config),
           dailyEmail: config.dailyEmail || DEFAULT_CONFIG.dailyEmail,
           isDefaultPassword: config.adminPasswordHash === hashPassword(DEFAULT_ADMIN_PASSWORD)
         }
@@ -931,7 +1296,7 @@ async function handleRequest(req, res) {
         googleScriptUrl: typeof body.googleScriptUrl === 'string' ? body.googleScriptUrl.trim() : current.googleScriptUrl,
         googleSheetUrl: typeof body.googleSheetUrl === 'string' ? body.googleSheetUrl.trim() : current.googleSheetUrl,
         ocrMode: body.ocrMode || current.ocrMode,
-        geminiModel: body.geminiModel || current.geminiModel || 'gemini-2.5-flash',
+        geminiModel: body.geminiModel || current.geminiModel || 'auto',
         dailyEmail: {
           ...current.dailyEmail,
           ...(body.dailyEmail && typeof body.dailyEmail === 'object' ? {
@@ -955,6 +1320,14 @@ async function handleRequest(req, res) {
         }
       }
 
+      if (
+        updated.geminiApiKey !== current.geminiApiKey ||
+        updated.ocrMode !== current.ocrMode ||
+        updated.geminiModel !== current.geminiModel
+      ) {
+        resetGeminiRuntimeState();
+      }
+
       writeJsonFile(CONFIG_FILE, updated);
       return sendJson(res, 200, {
         success: true,
@@ -963,9 +1336,102 @@ async function handleRequest(req, res) {
           googleSheetUrl: updated.googleSheetUrl,
           ocrMode: updated.ocrMode,
           hasGeminiApiKey: Boolean(updated.geminiApiKey),
+          geminiStatus: getGeminiStatus(updated),
           dailyEmail: updated.dailyEmail
         }
       });
+    }
+
+    if (pathname === '/api/admin/test-gemini' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return;
+      const body = await parseJsonBody(req);
+      const current = getConfig();
+      const candidateInput = typeof body.apiKey === 'string' ? body.apiKey.trim() : '';
+      const apiKey =
+        candidateInput && !candidateInput.includes('••••') && candidateInput !== '__CLEAR__'
+          ? candidateInput
+          : current.geminiApiKey;
+
+      if (!apiKey) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'Please enter or save a Gemini API key first.'
+        });
+      }
+
+      resetGeminiRuntimeState();
+      syncGeminiStateForKey(apiKey);
+
+      try {
+        const ranked = await discoverGeminiModels(apiKey, true);
+        if (!ranked || ranked.length === 0) {
+          return sendJson(res, 400, {
+            success: false,
+            error: 'No compatible Gemini Vision models returned for this API key.'
+          });
+        }
+
+        let pickedModel = '';
+        let lastErr = null;
+        for (const modelId of ranked.slice(0, 4)) {
+          try {
+            const pingEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+            const pingBody = JSON.stringify({
+              contents: [{ parts: [{ text: 'Reply with OK' }] }],
+              generationConfig: { maxOutputTokens: 5, temperature: 0 }
+            });
+            const pingRes = await fetchWithRedirects(pingEndpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': apiKey,
+                'Content-Length': Buffer.byteLength(pingBody)
+              },
+              body: pingBody,
+              timeout: 15000
+            });
+            if (pingRes.statusCode === 200 && pingRes.json) {
+              pickedModel = modelId;
+              geminiRuntimeState.activeModel = modelId;
+              break;
+            }
+            const errMsg = pingRes.json?.error?.message || `HTTP ${pingRes.statusCode}`;
+            lastErr = new Error(errMsg);
+            lastErr.statusCode = pingRes.statusCode;
+            if (isInvalidKeyError(pingRes.statusCode, errMsg)) break;
+          } catch (e) {
+            lastErr = e;
+          }
+        }
+
+        if (!pickedModel) {
+          const msg = lastErr?.message || 'Gemini ping failed';
+          const status = Number(lastErr?.statusCode) || 0;
+          if (isQuotaOrBillingError(status, msg)) {
+            geminiRuntimeState.pausedUntil = Date.now() + computeQuotaPauseDurationMs(msg);
+            geminiRuntimeState.pauseReason = 'Gemini free credits/quota exhausted — Host OCR active';
+          }
+          return sendJson(res, 400, {
+            success: false,
+            error: `Gemini test failed: ${msg}`,
+            availableModels: ranked.slice(0, 5),
+            geminiStatus: getGeminiStatus({ ...current, geminiApiKey: apiKey })
+          });
+        }
+
+        return sendJson(res, 200, {
+          success: true,
+          activeModel: pickedModel,
+          availableModels: ranked.slice(0, 5),
+          message: `Connected! Active model: ${pickedModel} (auto-discovered).`,
+          geminiStatus: getGeminiStatus({ ...current, geminiApiKey: apiKey })
+        });
+      } catch (err) {
+        return sendJson(res, 500, {
+          success: false,
+          error: err.message || 'Failed to test Gemini key.'
+        });
+      }
     }
 
     if (pathname === '/api/admin/change-password' && req.method === 'POST') {
@@ -1274,11 +1740,15 @@ function findGitBinary() {
         return sendJson(res, 400, { success: false, error: 'Missing imageBase64' });
       }
       const config = getConfig();
-      const result = await processImageOcrOnHost(body.imageBase64, config);
+      const result = await processImageOcrOnHost(body.imageBase64, config, {
+        skipGemini: Boolean(body.skipGemini)
+      });
       return sendJson(res, 200, {
         success: true,
         engine: result.engine,
-        extracted: result.extracted
+        extracted: result.extracted,
+        geminiFallbackReason: result.geminiFallbackReason || '',
+        geminiStatus: result.geminiStatus || getGeminiStatus(config)
       });
     }
 
@@ -1874,6 +2344,13 @@ function findGitBinary() {
         'Cache-Control': 'no-cache'
       });
       return fs.createReadStream(filePath).pipe(res);
+    }
+
+    if (pathname.startsWith('/api/')) {
+      return sendJson(res, 404, {
+        success: false,
+        error: `API route ${pathname} was not found on this server. If you just updated the app, please restart the server (or click "Install Update & Restart" in Admin Settings).`
+      });
     }
 
     const indexPath = path.join(PUBLIC_DIR, 'index.html');

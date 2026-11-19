@@ -11,7 +11,7 @@
 (function () {
   const STAFF_STORAGE_KEY = 'aimex_staff_name';
 
-  const SLIP_IMAGE_SPEC = { maxDim: 1400, quality: 0.82 };
+  const SLIP_IMAGE_SPEC = { maxDim: 1800, quality: 0.85 };
   const PACKAGING_IMAGE_SPEC = { maxDim: 960, quality: 0.68 };
 
   const DEFAULT_QUICK_ACCESS = [
@@ -136,6 +136,8 @@
       'googleTestResultBox',
       'settingsOcrMode',
       'settingsGeminiApiKey',
+      'testGeminiBtn',
+      'geminiStatusNote',
       'newAdminPasswordInput',
       'changeAdminPasswordBtn',
       'adminPwResultBox',
@@ -580,6 +582,7 @@
     els.previewDailySummaryBtn.addEventListener('click', handlePreviewDailySummary);
     els.sendDailySummaryNowBtn.addEventListener('click', handleSendDailySummaryNow);
     els.changeAdminPasswordBtn.addEventListener('click', handleChangeAdminPassword);
+    els.testGeminiBtn?.addEventListener('click', handleTestGemini);
     els.checkUpdateBtn?.addEventListener('click', () => handleAppUpdate(false));
     els.installUpdateBtn?.addEventListener('click', () => handleAppUpdate(true));
     els.saveSettingsBtn.addEventListener('click', handleSaveSettings);
@@ -613,16 +616,27 @@
       els.openGoogleSheetLink.classList.add('hidden');
     }
 
-    if (els.ocrEngineBadge) {
-      const useGemini =
-        state.config.ocrMode === 'gemini' ||
-        (state.config.ocrMode === 'auto' && state.config.hasGeminiApiKey);
-      const plat = state.networkInfo?.platform;
-      els.ocrEngineBadge.textContent = useGemini
-        ? 'Host AI OCR'
-        : plat === 'win32'
-          ? 'Windows Host OCR'
-          : 'Host OCR';
+    updateOcrEngineBadge();
+  }
+
+  function updateOcrEngineBadge() {
+    if (!els.ocrEngineBadge) return;
+    const plat = state.networkInfo?.platform;
+    const hostLabel = plat === 'win32' ? 'Windows Host OCR' : 'Host OCR';
+    const gs = state.config.geminiStatus || {};
+    const useGemini =
+      Boolean(state.config.hasGeminiApiKey) &&
+      (state.config.ocrMode === 'gemini' || state.config.ocrMode === 'auto');
+
+    if (!useGemini) {
+      els.ocrEngineBadge.textContent = hostLabel;
+      return;
+    }
+
+    if (gs.state === 'fallback_quota') {
+      els.ocrEngineBadge.textContent = `${hostLabel} (AI quota paused)`;
+    } else {
+      els.ocrEngineBadge.textContent = 'Gemini AI OCR';
     }
   }
 
@@ -670,69 +684,125 @@
   }
 
   /**
-   * Pure-JS shadow normalization fallback used only when a clean OCR pass misses a field.
-   * Clamps dark areas (such as black barcodes) so surrounding tracking numbers never wash out.
+   * Morphological local-max illumination normalization + upscaling for harsh shadow/low-light photos.
+   * Preserves dark barcodes while lifting shadows uniformly across the paper background.
    */
   function normalizeShadowForOcr(dataUrl) {
     return new Promise((resolve) => {
       const img = new Image();
       img.onload = () => {
-        const width = img.width;
-        const height = img.height;
+        const origMax = Math.max(img.width, img.height);
+        let width = img.width;
+        let height = img.height;
+        if (origMax > 0 && origMax < 1600) {
+          const targetMax = Math.min(2000, Math.round(origMax * 1.8));
+          const scale = targetMax / origMax;
+          width = Math.round(img.width * scale);
+          height = Math.round(img.height * scale);
+        }
 
         const srcCanvas = document.createElement('canvas');
         srcCanvas.width = width;
         srcCanvas.height = height;
         const srcCtx = srcCanvas.getContext('2d', { willReadFrequently: true });
+        srcCtx.imageSmoothingEnabled = true;
+        srcCtx.imageSmoothingQuality = 'high';
         srcCtx.drawImage(img, 0, 0, width, height);
 
-        // Downscaled illumination map (~1/16 size acts as hardware box-filter without ctx.filter)
-        const bgW = Math.max(24, Math.round(width / 16));
-        const bgH = Math.max(24, Math.round(height / 16));
-        const bgCanvas = document.createElement('canvas');
-        bgCanvas.width = bgW;
-        bgCanvas.height = bgH;
-        const bgCtx = bgCanvas.getContext('2d', { willReadFrequently: true });
-        bgCtx.drawImage(srcCanvas, 0, 0, bgW, bgH);
+        const srcData = srcCtx.getImageData(0, 0, width, height);
+        const p = srcData.data;
 
-        // Second tiny smooth pass (3x3 average on downscaled grid)
-        const smallData = bgCtx.getImageData(0, 0, bgW, bgH);
-        const sd = smallData.data;
-        const copy = new Uint8ClampedArray(sd);
-        for (let y = 1; y < bgH - 1; y++) {
-          for (let x = 1; x < bgW - 1; x++) {
-            const idx = (y * bgW + x) * 4;
-            let sum = 0;
-            for (let dy = -1; dy <= 1; dy++) {
-              for (let dx = -1; dx <= 1; dx++) {
-                const n = ((y + dy) * bgW + (x + dx)) * 4;
-                sum += 0.299 * copy[n] + 0.587 * copy[n + 1] + 0.114 * copy[n + 2];
+        // Build downscaled illumination grid using high-percentile local luminance so dark ink/barcodes don't drag bg down
+        const blockSize = Math.max(16, Math.round(Math.max(width, height) / 48));
+        const gridW = Math.max(8, Math.ceil(width / blockSize));
+        const gridH = Math.max(8, Math.ceil(height / blockSize));
+        const grid = new Float32Array(gridW * gridH);
+
+        for (let gy = 0; gy < gridH; gy++) {
+          const y0 = Math.floor((gy * height) / gridH);
+          const y1 = Math.min(height, Math.floor(((gy + 1) * height) / gridH));
+          for (let gx = 0; gx < gridW; gx++) {
+            const x0 = Math.floor((gx * width) / gridW);
+            const x1 = Math.min(width, Math.floor(((gx + 1) * width) / gridW));
+            const samples = [];
+            const stepY = Math.max(1, Math.floor((y1 - y0) / 6));
+            const stepX = Math.max(1, Math.floor((x1 - x0) / 6));
+            for (let y = y0; y < y1; y += stepY) {
+              for (let x = x0; x < x1; x += stepX) {
+                const idx = (y * width + x) * 4;
+                samples.push(0.299 * p[idx] + 0.587 * p[idx + 1] + 0.114 * p[idx + 2]);
               }
             }
-            const avg = sum / 9;
-            sd[idx] = sd[idx + 1] = sd[idx + 2] = avg;
+            if (samples.length === 0) {
+              grid[gy * gridW + gx] = 200;
+            } else {
+              samples.sort((a, b) => a - b);
+              const pIdx = Math.min(samples.length - 1, Math.floor(samples.length * 0.92));
+              grid[gy * gridW + gx] = samples[pIdx];
+            }
           }
         }
-        bgCtx.putImageData(smallData, 0, 0);
+
+        // 3x3 morphological dilation (local max) on the grid
+        const dilated = new Float32Array(gridW * gridH);
+        for (let y = 0; y < gridH; y++) {
+          for (let x = 0; x < gridW; x++) {
+            let mx = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+              const ny = Math.min(gridH - 1, Math.max(0, y + dy));
+              for (let dx = -1; dx <= 1; dx++) {
+                const nx = Math.min(gridW - 1, Math.max(0, x + dx));
+                const v = grid[ny * gridW + nx];
+                if (v > mx) mx = v;
+              }
+            }
+            dilated[y * gridW + x] = mx;
+          }
+        }
+
+        // 3x3 box smooth on the dilated background grid
+        const bgCanvas = document.createElement('canvas');
+        bgCanvas.width = gridW;
+        bgCanvas.height = gridH;
+        const bgCtx = bgCanvas.getContext('2d', { willReadFrequently: true });
+        const bgSmall = bgCtx.createImageData(gridW, gridH);
+        for (let y = 0; y < gridH; y++) {
+          for (let x = 0; x < gridW; x++) {
+            let sum = 0;
+            let cnt = 0;
+            for (let dy = -1; dy <= 1; dy++) {
+              const ny = Math.min(gridH - 1, Math.max(0, y + dy));
+              for (let dx = -1; dx <= 1; dx++) {
+                const nx = Math.min(gridW - 1, Math.max(0, x + dx));
+                sum += dilated[ny * gridW + nx];
+                cnt++;
+              }
+            }
+            const val = Math.round(sum / cnt);
+            const idx = (y * gridW + x) * 4;
+            bgSmall.data[idx] = val;
+            bgSmall.data[idx + 1] = val;
+            bgSmall.data[idx + 2] = val;
+            bgSmall.data[idx + 3] = 255;
+          }
+        }
+        bgCtx.putImageData(bgSmall, 0, 0);
 
         const bgFullCanvas = document.createElement('canvas');
         bgFullCanvas.width = width;
         bgFullCanvas.height = height;
         const bgFullCtx = bgFullCanvas.getContext('2d', { willReadFrequently: true });
+        bgFullCtx.imageSmoothingEnabled = true;
         bgFullCtx.drawImage(bgCanvas, 0, 0, width, height);
 
-        const srcData = srcCtx.getImageData(0, 0, width, height);
-        const bgData = bgFullCtx.getImageData(0, 0, width, height);
-        const p = srcData.data;
-        const b = bgData.data;
+        const b = bgFullCtx.getImageData(0, 0, width, height).data;
 
         for (let i = 0; i < p.length; i += 4) {
           const lum = 0.299 * p[i] + 0.587 * p[i + 1] + 0.114 * p[i + 2];
-          // Clamp bgLum high enough (>=145) so black barcodes never bleach adjacent tracking numbers
-          const bgLum = Math.max(145, 0.299 * b[i] + 0.587 * b[i + 1] + 0.114 * b[i + 2]);
-          let norm = (lum / bgLum) * 232;
-          norm = (norm - 170) * 1.45 + 185;
-          let out = norm * 0.55 + lum * 0.45;
+          // Clamp bgLum >= 45 so deep warehouse shadows lift cleanly without dividing by zero
+          const bgLum = Math.max(45, b[i]);
+          const norm = Math.min(255, (lum / bgLum) * 242);
+          let out = (norm - 155) * 1.45 + 175;
           out = out < 0 ? 0 : out > 255 ? 255 : out;
           p[i] = out;
           p[i + 1] = out;
@@ -740,7 +810,7 @@
         }
 
         srcCtx.putImageData(srcData, 0, 0);
-        resolve(srcCanvas.toDataURL('image/jpeg', SLIP_IMAGE_SPEC.quality));
+        resolve(srcCanvas.toDataURL('image/jpeg', 0.9));
       };
       img.onerror = () => resolve(dataUrl);
       img.src = dataUrl;
@@ -826,13 +896,20 @@
 
       let extracted = res.extracted || {};
       let engineUsed = res.engine || 'host';
+      let geminiFallbackReason = res.geminiFallbackReason || '';
 
-      // Pass 2: If a field is missing or uncertain (< 75%), retry with shadow normalization
+      if (res.geminiStatus) {
+        state.config.geminiStatus = res.geminiStatus;
+        updateOcrEngineBadge();
+      }
+
+      // Pass 2: If a field is missing or uncertain (< 78%), retry with shadow normalization
+      // Never burn another Gemini API call on Pass 2 if Pass 1 already tried Gemini
       const needsShadowRetry =
         !extracted.customerName ||
         !extracted.trackingNumber ||
-        (Number(extracted.customerNameCertainty) || 0) < 75 ||
-        (Number(extracted.trackingNumberCertainty) || 0) < 75;
+        (Number(extracted.customerNameCertainty) || 0) < 78 ||
+        (Number(extracted.trackingNumberCertainty) || 0) < 78;
 
       if (needsShadowRetry) {
         els.ocrStatusText.textContent = 'Enhancing shadows & re-checking on host...';
@@ -840,8 +917,19 @@
         const res2 = await fetch('/api/ocr', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ imageBase64: shadowNormalized })
+          body: JSON.stringify({
+            imageBase64: shadowNormalized,
+            skipGemini: engineUsed.startsWith('gemini')
+          })
         }).then((r) => r.json());
+
+        if (res2.geminiStatus) {
+          state.config.geminiStatus = res2.geminiStatus;
+          updateOcrEngineBadge();
+        }
+        if (res2.geminiFallbackReason && !geminiFallbackReason) {
+          geminiFallbackReason = res2.geminiFallbackReason;
+        }
 
         if (res2.success && res2.extracted) {
           const ex2 = res2.extracted;
@@ -878,9 +966,13 @@
 
       els.ocrProgressBar.className = 'ocr-progress';
       els.ocrProgressBar.value = 100;
+      const quotaSuffix =
+        geminiFallbackReason && state.config.geminiStatus?.state === 'fallback_quota'
+          ? ' — AI quota paused'
+          : '';
       els.ocrStatusText.textContent =
         nameCert || trackCert
-          ? `Extracted (${engineUsed})`
+          ? `Extracted (${engineUsed}${quotaSuffix})`
           : 'Could not read label — retake photo or enter manually';
       els.ocrPercentText.textContent = nameCert || trackCert ? 'Done' : '';
 
@@ -1910,14 +2002,27 @@
   // ADMIN AUTH & SETTINGS MODAL
   // ==========================================================================
 
-  function adminFetch(url, opts = {}) {
-    return fetch(url, {
+  async function adminFetch(url, opts = {}) {
+    const res = await fetch(url, {
       ...opts,
       headers: {
         ...(opts.headers || {}),
         'X-Admin-Token': state.adminToken
       }
-    }).then((r) => r.json());
+    });
+    const text = await res.text();
+    let json = null;
+    try {
+      json = JSON.parse(text);
+    } catch (e) {
+      if (text.includes('<!DOCTYPE') || text.includes('<html')) {
+        throw new Error(
+          'Server returned an outdated web page instead of JSON. The host server must be restarted to apply new routes (close and re-run start-dispatch-server.bat, or click "Install Update & Restart").'
+        );
+      }
+      throw new Error(`Server returned non-JSON response (${res.status}): ${text.slice(0, 100)}`);
+    }
+    return json;
   }
 
   async function openSettingsModal() {
@@ -1986,6 +2091,23 @@
       els.settingsGoogleScriptUrl.value = c.googleScriptUrl || '';
       els.settingsOcrMode.value = c.ocrMode || 'auto';
       els.settingsGeminiApiKey.value = c.geminiApiKeyMasked || '';
+
+      if (els.geminiStatusNote) {
+        const gs = c.geminiStatus || {};
+        if (c.hasGeminiApiKey && gs.state === 'fallback_quota') {
+          els.geminiStatusNote.classList.remove('hidden');
+          els.geminiStatusNote.style.background = '#fef2f2';
+          els.geminiStatusNote.style.color = '#991b1b';
+          els.geminiStatusNote.textContent = gs.reason || 'Gemini quota exhausted — reverted to Host OCR.';
+        } else if (c.hasGeminiApiKey && gs.state === 'active' && gs.activeModel && gs.activeModel !== 'auto') {
+          els.geminiStatusNote.classList.remove('hidden');
+          els.geminiStatusNote.style.background = '#ecfdf5';
+          els.geminiStatusNote.style.color = '#065f46';
+          els.geminiStatusNote.textContent = `Gemini active (${gs.activeModel}). Automatically falls back to Host OCR if credits run out.`;
+        } else {
+          els.geminiStatusNote.classList.add('hidden');
+        }
+      }
 
       const de = c.dailyEmail || {};
       els.dailyEmailEnabledInput.checked = de.enabled !== false;
@@ -2188,6 +2310,43 @@
       els.adminPwResultBox.style.background = '#fef2f2';
       els.adminPwResultBox.style.color = '#991b1b';
       els.adminPwResultBox.textContent = err.message;
+    }
+  }
+
+  async function handleTestGemini() {
+    if (!els.geminiStatusNote) return;
+    els.geminiStatusNote.classList.remove('hidden');
+    els.geminiStatusNote.style.background = '#f1f5f9';
+    els.geminiStatusNote.style.color = '#334155';
+    els.geminiStatusNote.textContent = 'Discovering & testing latest Gemini model...';
+
+    const rawKey = (els.settingsGeminiApiKey?.value || '').trim();
+    try {
+      const res = await adminFetch('/api/admin/test-gemini', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: rawKey })
+      });
+
+      if (res.geminiStatus) {
+        state.config.geminiStatus = res.geminiStatus;
+        updateOcrEngineBadge();
+      }
+
+      if (!res.success) {
+        els.geminiStatusNote.style.background = '#fef2f2';
+        els.geminiStatusNote.style.color = '#991b1b';
+        els.geminiStatusNote.textContent = res.error || 'Gemini test failed.';
+        return;
+      }
+
+      els.geminiStatusNote.style.background = '#ecfdf5';
+      els.geminiStatusNote.style.color = '#065f46';
+      els.geminiStatusNote.textContent = res.message || `Connected (${res.activeModel}).`;
+    } catch (err) {
+      els.geminiStatusNote.style.background = '#fef2f2';
+      els.geminiStatusNote.style.color = '#991b1b';
+      els.geminiStatusNote.textContent = err.message || 'Failed to test Gemini key.';
     }
   }
 

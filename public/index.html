@@ -670,9 +670,9 @@
             <div class="field-group">
               <label for="settingsOcrMode">OCR Mode</label>
               <select id="settingsOcrMode">
-                <option value="auto">Auto (Gemini AI if key set, else Windows/Host OCR)</option>
+                <option value="auto">Auto (Gemini AI if credits available, else Host OCR)</option>
                 <option value="host">Host OCR Only (Free, Offline)</option>
-                <option value="gemini">Gemini Vision AI (Highest Accuracy)</option>
+                <option value="gemini">Gemini Vision AI (auto-reverts to Host OCR on quota end)</option>
               </select>
             </div>
             <div class="field-group">
@@ -688,6 +688,10 @@
               />
             </div>
           </div>
+          <div class="action-row block-gap-xs">
+            <button type="button" id="testGeminiBtn" class="btn btn-outline btn-sm">Test Gemini Key</button>
+          </div>
+          <div id="geminiStatusNote" class="result-note hidden block-gap-xs" role="status"></div>
         </div>
 
         <hr class="hairline" />
