@@ -764,7 +764,6 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
         quantity: p.quantity || 0,
         location: p.location || '-'
       }));
-  const byStaff = Array.isArray(summary.byStaff) ? summary.byStaff : [];
   const byCourier = Array.isArray(summary.byCourier) ? summary.byCourier : [];
   const totalOrders = summary.totalOrders || 0;
   const totalUnits = summary.totalUnits || 0;
@@ -799,22 +798,6 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
     });
   }
 
-  if (byStaff.length > 0) {
-    plainLines.push('', 'BY STAFF:');
-    byStaff.forEach((s) => {
-      plainLines.push(`  - ${s.staffName}: ${s.orders} orders (${s.units} units)`);
-    });
-  }
-
-  plainLines.push('', 'COURIER PARCEL TOTALS:');
-  if (byCourier.length === 0) {
-    plainLines.push('  No parcels dispatched today.');
-  } else {
-    byCourier.forEach((c) => {
-      plainLines.push(`  - ${c.carrier || 'Unspecified'}: ${c.parcels} parcel(s)`);
-    });
-  }
-
   if (sheetUrl) {
     plainLines.push('', `Google Sheet: ${sheetUrl}`);
   }
@@ -832,14 +815,6 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
         <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;color:#334155;">${escapeHtml_(e.location || '-')}</td>
       </tr>
     `).join('');
-
-  const staffRowsHtml = byStaff.map((s) => `
-    <tr>
-      <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0;color:#001e34;">${escapeHtml_(s.staffName)}</td>
-      <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0;text-align:right;">${s.orders}</td>
-      <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;">${s.units}</td>
-    </tr>
-  `).join('');
 
   const courierRowsHtml = byCourier.length === 0
     ? '<tr><td colspan="2" style="padding:10px 12px;color:#64748b;text-align:center;">No parcels dispatched today.</td></tr>'
@@ -884,31 +859,6 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
             </tr>
           </thead>
           <tbody>${tableRowsHtml}</tbody>
-        </table>
-
-        ${byStaff.length > 0 ? `
-          <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Staff Breakdown</h3>
-          <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
-            <thead>
-              <tr style="background:#f1f5f9;color:#475569;text-align:left;">
-                <th style="padding:8px 12px;">Staff</th>
-                <th style="padding:8px 12px;text-align:right;">Orders</th>
-                <th style="padding:8px 12px;text-align:right;">Units</th>
-              </tr>
-            </thead>
-            <tbody>${staffRowsHtml}</tbody>
-          </table>
-        ` : ''}
-
-        <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Courier Parcel Totals</h3>
-        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
-          <thead>
-            <tr style="background:#fef9c3;color:#001e34;text-align:left;">
-              <th style="padding:8px 12px;">Courier</th>
-              <th style="padding:8px 12px;text-align:right;">Parcels</th>
-            </tr>
-          </thead>
-          <tbody>${courierRowsHtml}</tbody>
         </table>
 
         ${sheetUrl ? `<p style="margin:12px 0 0;"><a href="${sheetUrl}" style="display:inline-block;background:#001e34;color:#fdd400;text-decoration:none;padding:9px 14px;border-radius:6px;font-weight:bold;font-size:13px;">Open Google Sheet</a></p>` : ''}
