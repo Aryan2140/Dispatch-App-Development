@@ -70,6 +70,14 @@ const DEFAULT_CONFIG = {
     lastSentDate: '',
     lastSentStatus: '',
     lastSentError: ''
+  },
+  localCleanup: {
+    enabled: true,
+    retentionDays: 2,
+    time: '20:00',
+    lastRunDate: '',
+    lastRunStatus: '',
+    lastRunError: ''
   }
 };
 
@@ -107,6 +115,10 @@ function getConfig() {
   }
   if (!cfg.dailyEmail || typeof cfg.dailyEmail !== 'object') {
     cfg.dailyEmail = { ...DEFAULT_CONFIG.dailyEmail };
+    changed = true;
+  }
+  if (!cfg.localCleanup || typeof cfg.localCleanup !== 'object') {
+    cfg.localCleanup = { ...DEFAULT_CONFIG.localCleanup };
     changed = true;
   }
   if (!cfg.geminiModel || cfg.geminiModel === 'gemini-2.5-flash') {
@@ -412,6 +424,362 @@ function startDailyEmailScheduler() {
       console.error('[Scheduler] Daily summary error:', err.message);
     } finally {
       dailyCheckInProgress = false;
+    }
+  }, 30000);
+}
+
+// ============================================================================
+// LOCAL IMAGE RETENTION & CLOUD-VERIFIED CLEANUP
+// ============================================================================
+
+function getLocalImageStorageStats() {
+  let folderCount = 0;
+  let dispatchImageCount = 0;
+  let draftImageCount = 0;
+  let totalBytes = 0;
+
+  try {
+    if (fs.existsSync(DRAFTS_DIR)) {
+      for (const file of fs.readdirSync(DRAFTS_DIR)) {
+        if (file.startsWith('.')) continue;
+        const full = path.join(DRAFTS_DIR, file);
+        try {
+          const st = fs.statSync(full);
+          if (st.isFile()) {
+            draftImageCount += 1;
+            totalBytes += st.size;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (fs.existsSync(UPLOADS_DIR)) {
+      for (const entry of fs.readdirSync(UPLOADS_DIR)) {
+        if (entry === '_drafts' || entry.startsWith('.')) continue;
+        const folderPath = path.join(UPLOADS_DIR, entry);
+        try {
+          const st = fs.statSync(folderPath);
+          if (!st.isDirectory()) continue;
+          let folderHasFiles = false;
+          for (const file of fs.readdirSync(folderPath)) {
+            if (file.startsWith('.')) continue;
+            const filePath = path.join(folderPath, file);
+            try {
+              const fst = fs.statSync(filePath);
+              if (fst.isFile()) {
+                folderHasFiles = true;
+                dispatchImageCount += 1;
+                totalBytes += fst.size;
+              }
+            } catch (e) {}
+          }
+          if (folderHasFiles) folderCount += 1;
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+
+  return {
+    folderCount,
+    dispatchImageCount,
+    draftImageCount,
+    totalImageCount: dispatchImageCount + draftImageCount,
+    totalBytes
+  };
+}
+
+function getDispatchDateMs(dispatchId, record, folderPath) {
+  if (record?.createdAtIso) {
+    const t = Date.parse(record.createdAtIso);
+    if (!Number.isNaN(t)) return t;
+  }
+  if (record?.timestamp) {
+    const t = Date.parse(String(record.timestamp).replace(' ', 'T'));
+    if (!Number.isNaN(t)) return t;
+  }
+  if (record?.orderDate) {
+    const t = Date.parse(`${record.orderDate}T23:59:59`);
+    if (!Number.isNaN(t)) return t;
+  }
+  const m = /^DSP-(\d{4})(\d{2})(\d{2})-/.exec(String(dispatchId || ''));
+  if (m) {
+    const t = Date.parse(`${m[1]}-${m[2]}-${m[3]}T23:59:59`);
+    if (!Number.isNaN(t)) return t;
+  }
+  let newestMtime = 0;
+  try {
+    for (const file of fs.readdirSync(folderPath)) {
+      if (file.startsWith('.')) continue;
+      const fst = fs.statSync(path.join(folderPath, file));
+      if (fst.mtimeMs > newestMtime) newestMtime = fst.mtimeMs;
+    }
+    if (!newestMtime) newestMtime = fs.statSync(folderPath).mtimeMs;
+  } catch (e) {}
+  return newestMtime || Date.now();
+}
+
+async function runLocalImageCleanup() {
+  const config = getConfig();
+  const lc = config.localCleanup || DEFAULT_CONFIG.localCleanup;
+  const retentionDays = Math.max(1, Math.min(365, parseInt(lc.retentionDays, 10) || 2));
+  const cutoffMs = Date.now() - retentionDays * 24 * 60 * 60 * 1000;
+  const { dateStr, timeStr } = getSydneyDateAndTime();
+
+  if (!config.googleScriptUrl) {
+    config.localCleanup = {
+      ...lc,
+      lastRunDate: dateStr,
+      lastRunStatus: `Skipped at ${timeStr} — Google Sheets/Drive not connected`,
+      lastRunError: ''
+    };
+    writeJsonFile(CONFIG_FILE, config);
+    return {
+      success: true,
+      skipped: true,
+      reason: 'Google Sheets/Drive is not connected, so cloud upload cannot be verified.',
+      deletedFolders: 0,
+      deletedFiles: 0,
+      freedBytes: 0,
+      skippedUnverified: 0,
+      stats: getLocalImageStorageStats(),
+      localCleanup: config.localCleanup
+    };
+  }
+
+  let dispatches = readJsonFile(DISPATCHES_FILE, []);
+  const localById = new Map(dispatches.map((d) => [d.dispatchId, d]));
+  const remoteSyncedMap = new Map();
+  let cloudFetchOk = false;
+
+  try {
+    const targetUrl = `${config.googleScriptUrl}${config.googleScriptUrl.includes('?') ? '&' : '?'}action=search&limit=500`;
+    const gsRes = await fetchWithRedirects(targetUrl, { method: 'GET', timeout: 25000 });
+    if (gsRes.json && gsRes.json.success && Array.isArray(gsRes.json.dispatches)) {
+      cloudFetchOk = true;
+      for (const remote of gsRes.json.dispatches) {
+        if (remote && remote.dispatchId) {
+          remoteSyncedMap.set(remote.dispatchId, remote);
+        }
+      }
+    }
+  } catch (err) {
+    console.warn('[Cleanup] Cloud verification fetch failed, using local sync records:', err.message);
+  }
+
+  let deletedFolders = 0;
+  let deletedFiles = 0;
+  let freedBytes = 0;
+  let skippedUnverified = 0;
+  let dispatchesChanged = false;
+
+  // Clean up stale abandoned draft photos older than retentionDays
+  try {
+    if (fs.existsSync(DRAFTS_DIR)) {
+      for (const file of fs.readdirSync(DRAFTS_DIR)) {
+        if (file.startsWith('.')) continue;
+        const full = path.join(DRAFTS_DIR, file);
+        try {
+          const st = fs.statSync(full);
+          if (st.isFile() && st.mtimeMs <= cutoffMs) {
+            fs.unlinkSync(full);
+            deletedFiles += 1;
+            freedBytes += st.size;
+          }
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+
+  // Check every dispatch folder in data/uploads/
+  try {
+    if (fs.existsSync(UPLOADS_DIR)) {
+      for (const entry of fs.readdirSync(UPLOADS_DIR)) {
+        if (entry === '_drafts' || entry.startsWith('.')) continue;
+        const folderPath = path.join(UPLOADS_DIR, entry);
+        let st;
+        try {
+          st = fs.statSync(folderPath);
+        } catch (e) {
+          continue;
+        }
+        if (!st.isDirectory()) continue;
+
+        const record = localById.get(entry);
+        const remote = remoteSyncedMap.get(entry);
+
+        // Sync local record status if remote confirms it
+        if (record && remote && record.syncStatus !== 'synced') {
+          record.syncStatus = 'synced';
+          record.syncError = null;
+          if (remote.driveFolderUrl) record.driveFolderUrl = remote.driveFolderUrl;
+          dispatchesChanged = true;
+        }
+
+        const dateMs = getDispatchDateMs(entry, record || remote, folderPath);
+        if (dateMs > cutoffMs) continue; // Still within retention window
+
+        const isCloudVerified =
+          Boolean(remote && (remote.driveFolderUrl || cloudFetchOk)) ||
+          Boolean(record && record.syncStatus === 'synced' && record.driveFolderUrl);
+
+        if (!isCloudVerified) {
+          skippedUnverified += 1;
+          continue;
+        }
+
+        let folderBytes = 0;
+        let folderFiles = 0;
+        try {
+          for (const f of fs.readdirSync(folderPath)) {
+            if (f.startsWith('.')) continue;
+            const fst = fs.statSync(path.join(folderPath, f));
+            if (fst.isFile()) {
+              folderFiles += 1;
+              folderBytes += fst.size;
+            }
+          }
+        } catch (e) {}
+
+        fs.rmSync(folderPath, { recursive: true, force: true });
+        deletedFolders += 1;
+        deletedFiles += folderFiles;
+        freedBytes += folderBytes;
+
+        if (record) {
+          record.localPackagingUrls = [];
+          record.localTrackingSlipUrl = null;
+          dispatchesChanged = true;
+        }
+      }
+    }
+  } catch (err) {
+    config.localCleanup = {
+      ...lc,
+      lastRunDate: dateStr,
+      lastRunStatus: 'error',
+      lastRunError: err.message
+    };
+    writeJsonFile(CONFIG_FILE, config);
+    throw err;
+  }
+
+  if (dispatchesChanged) {
+    writeJsonFile(DISPATCHES_FILE, dispatches);
+  }
+
+  const freedMb = (freedBytes / (1024 * 1024)).toFixed(2);
+  const statusSummary = deletedFiles > 0
+    ? `Checked at ${timeStr} — Deleted ${deletedFiles} image(s) (${freedMb} MB)`
+    : `Checked at ${timeStr} — No expired synced images to delete`;
+
+  config.localCleanup = {
+    ...lc,
+    retentionDays,
+    lastRunDate: dateStr,
+    lastRunStatus: statusSummary,
+    lastRunError: ''
+  };
+  writeJsonFile(CONFIG_FILE, config);
+
+  return {
+    success: true,
+    deletedFolders,
+    deletedFiles,
+    freedBytes,
+    skippedUnverified,
+    stats: getLocalImageStorageStats(),
+    localCleanup: config.localCleanup
+  };
+}
+
+function clearAllLocalImages() {
+  let deletedFolders = 0;
+  let deletedFiles = 0;
+  let freedBytes = 0;
+
+  if (fs.existsSync(DRAFTS_DIR)) {
+    for (const file of fs.readdirSync(DRAFTS_DIR)) {
+      if (file.startsWith('.')) continue;
+      const full = path.join(DRAFTS_DIR, file);
+      try {
+        const st = fs.statSync(full);
+        if (st.isFile()) {
+          fs.unlinkSync(full);
+          deletedFiles += 1;
+          freedBytes += st.size;
+        }
+      } catch (e) {}
+    }
+  }
+
+  if (fs.existsSync(UPLOADS_DIR)) {
+    for (const entry of fs.readdirSync(UPLOADS_DIR)) {
+      if (entry === '_drafts' || entry.startsWith('.')) continue;
+      const folderPath = path.join(UPLOADS_DIR, entry);
+      try {
+        const st = fs.statSync(folderPath);
+        if (!st.isDirectory()) continue;
+        for (const f of fs.readdirSync(folderPath)) {
+          if (f.startsWith('.')) continue;
+          try {
+            const fst = fs.statSync(path.join(folderPath, f));
+            if (fst.isFile()) {
+              deletedFiles += 1;
+              freedBytes += fst.size;
+            }
+          } catch (e) {}
+        }
+        fs.rmSync(folderPath, { recursive: true, force: true });
+        deletedFolders += 1;
+      } catch (e) {}
+    }
+  }
+
+  const dispatches = readJsonFile(DISPATCHES_FILE, []);
+  let changed = false;
+  for (const d of dispatches) {
+    if ((Array.isArray(d.localPackagingUrls) && d.localPackagingUrls.length > 0) || d.localTrackingSlipUrl) {
+      d.localPackagingUrls = [];
+      d.localTrackingSlipUrl = null;
+      changed = true;
+    }
+  }
+  if (changed) {
+    writeJsonFile(DISPATCHES_FILE, dispatches);
+  }
+
+  return {
+    success: true,
+    deletedFolders,
+    deletedFiles,
+    freedBytes,
+    stats: getLocalImageStorageStats()
+  };
+}
+
+let localCleanupInProgress = false;
+function startLocalCleanupScheduler() {
+  setInterval(async () => {
+    if (localCleanupInProgress) return;
+    localCleanupInProgress = true;
+    try {
+      const config = getConfig();
+      const lc = config.localCleanup || {};
+      if (!lc.enabled) return;
+
+      const { dateStr, timeStr } = getSydneyDateAndTime();
+      const targetTime = /^\d{2}:\d{2}$/.test(lc.time || '') ? lc.time : '20:00';
+
+      if (lc.lastRunDate === dateStr) return;
+      if (timeStr >= targetTime) {
+        console.log(`[Scheduler] Running daily local image cleanup check for ${dateStr}...`);
+        const result = await runLocalImageCleanup();
+        console.log(`[Scheduler] Local image cleanup complete: ${result.localCleanup?.lastRunStatus || 'done'}`);
+      }
+    } catch (err) {
+      console.error('[Scheduler] Local image cleanup error:', err.message);
+    } finally {
+      localCleanupInProgress = false;
     }
   }, 30000);
 }
@@ -1322,6 +1690,8 @@ async function handleRequest(req, res) {
           hasGeminiApiKey: Boolean(config.geminiApiKey),
           geminiStatus: getGeminiStatus(config),
           dailyEmail: config.dailyEmail || DEFAULT_CONFIG.dailyEmail,
+          localCleanup: config.localCleanup || DEFAULT_CONFIG.localCleanup,
+          localStorageStats: getLocalImageStorageStats(),
           isDefaultPassword: config.adminPasswordHash === hashPassword(DEFAULT_ADMIN_PASSWORD)
         }
       });
@@ -1348,6 +1718,17 @@ async function handleRequest(req, res) {
             time: /^\d{2}:\d{2}$/.test(body.dailyEmail.time || '')
               ? body.dailyEmail.time
               : current.dailyEmail.time || '15:00'
+          } : {})
+        },
+        localCleanup: {
+          ...DEFAULT_CONFIG.localCleanup,
+          ...current.localCleanup,
+          ...(body.localCleanup && typeof body.localCleanup === 'object' ? {
+            enabled: Boolean(body.localCleanup.enabled),
+            retentionDays: Math.max(1, Math.min(365, parseInt(body.localCleanup.retentionDays, 10) || current.localCleanup?.retentionDays || 2)),
+            time: /^\d{2}:\d{2}$/.test(body.localCleanup.time || '')
+              ? body.localCleanup.time
+              : current.localCleanup?.time || '20:00'
           } : {})
         }
       };
@@ -1512,6 +1893,32 @@ async function handleRequest(req, res) {
           summary: buildDailySummary(dateStr),
           adminEmail: String(config.dailyEmail?.adminEmail || '').trim(),
           date: dateStr
+        });
+      }
+    }
+
+    if (pathname === '/api/admin/local-images/cleanup' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return;
+      try {
+        const result = await runLocalImageCleanup();
+        return sendJson(res, 200, result);
+      } catch (err) {
+        return sendJson(res, 500, {
+          success: false,
+          error: err.message || 'Failed to run local image cleanup.'
+        });
+      }
+    }
+
+    if (pathname === '/api/admin/local-images/clear-all' && req.method === 'POST') {
+      if (!requireAdmin(req, res)) return;
+      try {
+        const result = clearAllLocalImages();
+        return sendJson(res, 200, result);
+      } catch (err) {
+        return sendJson(res, 500, {
+          success: false,
+          error: err.message || 'Failed to clear local images.'
         });
       }
     }
@@ -2680,4 +3087,5 @@ server.listen(PORT, HOST, () => {
   }
   getHostTesseractWorker();
   startDailyEmailScheduler();
+  startLocalCleanupScheduler();
 });

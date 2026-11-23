@@ -705,7 +705,38 @@
 
         <hr class="hairline" />
 
-        <!-- 4. Change Admin Password -->
+        <!-- 4. Local Image Storage & Auto-Cleanup -->
+        <div class="admin-block">
+          <div class="row-between row-tight">
+            <h3 class="admin-block-title">Local Image Storage</h3>
+            <label class="toggle-switch" for="localCleanupEnabledInput">
+              <input type="checkbox" id="localCleanupEnabledInput" switch />
+              <span class="toggle-label">Auto-Cleanup</span>
+            </label>
+          </div>
+          <p class="card-sub">Keeps packaging photos locally for quick access, then deletes them after confirming cloud upload to Google Drive.</p>
+
+          <div class="fields-split block-gap-sm">
+            <div class="field-group">
+              <label for="localCleanupDaysInput">Keep Locally (Days)</label>
+              <input type="number" id="localCleanupDaysInput" min="1" max="365" value="2" />
+            </div>
+            <div class="field-group">
+              <label for="localCleanupTimeInput">Daily Check Time (AEST)</label>
+              <input type="time" id="localCleanupTimeInput" value="20:00" />
+            </div>
+          </div>
+
+          <div class="action-row block-gap-sm">
+            <button type="button" id="runLocalCleanupNowBtn" class="btn btn-outline btn-sm">Run Cleanup Check Now</button>
+            <button type="button" id="clearAllLocalImagesBtn" class="btn btn-danger btn-sm">Clear All Local Images</button>
+          </div>
+          <div id="localCleanupStatusNote" class="result-note hidden block-gap-xs" role="status"></div>
+        </div>
+
+        <hr class="hairline" />
+
+        <!-- 5. Change Admin Password -->
         <div class="admin-block">
           <h3 class="admin-block-title">Change Admin Password</h3>
           <div class="row-between block-gap-xs">
@@ -820,6 +851,27 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-outline btn-sm" data-close-modal="confirmClearModal" autofocus>Cancel</button>
         <button type="button" id="confirmClearBtn" class="btn btn-danger btn-sm">Clear Form</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- CONFIRM CLEAR ALL LOCAL IMAGES MODAL (Double Confirmation)           -->
+  <!-- ==================================================================== -->
+  <dialog id="confirmPurgeLocalImagesModal" class="native-modal" aria-labelledby="confirmPurgeLocalImagesTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="confirmPurgeLocalImagesTitle">Clear All Locally Saved Images?</h2>
+        <button type="button" class="modal-close" data-close-modal="confirmPurgeLocalImagesModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body stack">
+        <p id="confirmPurgeLocalImagesMsg" class="card-sub"></p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline btn-sm" data-close-modal="confirmPurgeLocalImagesModal" autofocus>Cancel</button>
+        <button type="button" id="confirmPurgeLocalImagesBtn" class="btn btn-danger btn-sm">Continue</button>
       </div>
     </div>
   </dialog>

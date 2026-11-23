@@ -146,6 +146,16 @@
       'settingsGeminiApiKey',
       'testGeminiBtn',
       'geminiStatusNote',
+      'localCleanupEnabledInput',
+      'localCleanupDaysInput',
+      'localCleanupTimeInput',
+      'runLocalCleanupNowBtn',
+      'clearAllLocalImagesBtn',
+      'localCleanupStatusNote',
+      'confirmPurgeLocalImagesModal',
+      'confirmPurgeLocalImagesTitle',
+      'confirmPurgeLocalImagesMsg',
+      'confirmPurgeLocalImagesBtn',
       'newAdminPasswordInput',
       'changeAdminPasswordBtn',
       'adminPwResultBox',
@@ -570,6 +580,9 @@
     els.sendDailySummaryNowBtn.addEventListener('click', handleSendDailySummaryNow);
     els.changeAdminPasswordBtn.addEventListener('click', handleChangeAdminPassword);
     els.testGeminiBtn?.addEventListener('click', handleTestGemini);
+    els.runLocalCleanupNowBtn?.addEventListener('click', handleRunLocalCleanupNow);
+    els.clearAllLocalImagesBtn?.addEventListener('click', handleOpenPurgeLocalImagesModal);
+    els.confirmPurgeLocalImagesBtn?.addEventListener('click', handleConfirmPurgeLocalImages);
     els.checkUpdateBtn?.addEventListener('click', () => handleAppUpdate(false));
     els.installUpdateBtn?.addEventListener('click', () => handleAppUpdate(true));
     els.saveSettingsBtn.addEventListener('click', handleSaveSettings);
@@ -2449,6 +2462,12 @@
           : `Last sent: ${de.lastSentDate} (${de.lastSentStatus || 'OK'})`;
       }
 
+      const lc = c.localCleanup || {};
+      if (els.localCleanupEnabledInput) els.localCleanupEnabledInput.checked = lc.enabled !== false;
+      if (els.localCleanupDaysInput) els.localCleanupDaysInput.value = lc.retentionDays || 2;
+      if (els.localCleanupTimeInput) els.localCleanupTimeInput.value = lc.time || '20:00';
+      renderLocalCleanupStatus(c.localStorageStats, lc);
+
       return true;
     } catch (err) {
       return false;
@@ -2751,6 +2770,129 @@
     }
   }
 
+  let purgeLocalImagesStep = 1;
+  let lastLocalStorageStats = null;
+
+  function renderLocalCleanupStatus(stats, lc) {
+    if (!els.localCleanupStatusNote) return;
+    if (stats) lastLocalStorageStats = stats;
+    const s = stats || lastLocalStorageStats;
+    const parts = [];
+    if (s) {
+      const mb = (s.totalBytes / (1024 * 1024)).toFixed(2);
+      parts.push(`Stored locally: ${s.totalImageCount} image(s) (${mb} MB) across ${s.folderCount} dispatch(es)`);
+    }
+    if (lc?.lastRunError) {
+      parts.push(`Last error: ${lc.lastRunError}`);
+    } else if (lc?.lastRunDate) {
+      parts.push(`Last check: ${lc.lastRunDate} (${lc.lastRunStatus || 'OK'})`);
+    }
+    if (parts.length > 0) {
+      els.localCleanupStatusNote.classList.remove('hidden');
+      els.localCleanupStatusNote.style.background = lc?.lastRunError ? '#fef2f2' : '#f1f5f9';
+      els.localCleanupStatusNote.style.color = lc?.lastRunError ? '#991b1b' : '#334155';
+      els.localCleanupStatusNote.textContent = parts.join(' • ');
+    }
+  }
+
+  async function handleRunLocalCleanupNow() {
+    if (!els.runLocalCleanupNowBtn) return;
+    const prevText = els.runLocalCleanupNowBtn.textContent;
+    els.runLocalCleanupNowBtn.disabled = true;
+    els.runLocalCleanupNowBtn.textContent = 'Checking...';
+    try {
+      await handleSaveSettings(false);
+      const res = await adminFetch('/api/admin/local-images/cleanup', { method: 'POST' });
+      if (!res.success) throw new Error(res.error || 'Cleanup check failed.');
+      renderLocalCleanupStatus(res.stats, res.localCleanup);
+      if (res.deletedFiles > 0) {
+        loadDispatches(false);
+      }
+      if (res.skipped) {
+        showBanner('error', res.reason || 'Cleanup skipped.');
+      } else if (res.deletedFiles > 0) {
+        const mb = (res.freedBytes / (1024 * 1024)).toFixed(2);
+        showBanner('success', `Deleted ${res.deletedFiles} expired synced image(s) (${mb} MB).`);
+      } else {
+        showBanner('success', 'Cleanup check complete — no expired synced images to delete.');
+      }
+    } catch (err) {
+      if (els.localCleanupStatusNote) {
+        els.localCleanupStatusNote.classList.remove('hidden');
+        els.localCleanupStatusNote.style.background = '#fef2f2';
+        els.localCleanupStatusNote.style.color = '#991b1b';
+        els.localCleanupStatusNote.textContent = `Cleanup error: ${err.message}`;
+      }
+    } finally {
+      els.runLocalCleanupNowBtn.disabled = false;
+      els.runLocalCleanupNowBtn.textContent = prevText;
+    }
+  }
+
+  function handleOpenPurgeLocalImagesModal() {
+    if (!els.confirmPurgeLocalImagesModal) return;
+    purgeLocalImagesStep = 1;
+    const s = lastLocalStorageStats;
+    const countText = s
+      ? `${s.totalImageCount} image(s) (${(s.totalBytes / (1024 * 1024)).toFixed(2)} MB) across ${s.folderCount} dispatch(es)`
+      : 'all locally saved images';
+    if (els.confirmPurgeLocalImagesTitle) {
+      els.confirmPurgeLocalImagesTitle.textContent = 'Clear All Locally Saved Images?';
+    }
+    if (els.confirmPurgeLocalImagesMsg) {
+      els.confirmPurgeLocalImagesMsg.textContent =
+        `This will permanently delete ${countText} from the host computer. Images already synced to Google Drive will remain in the cloud, but any unsynced local-only photos cannot be recovered.`;
+    }
+    if (els.confirmPurgeLocalImagesBtn) {
+      els.confirmPurgeLocalImagesBtn.disabled = false;
+      els.confirmPurgeLocalImagesBtn.textContent = 'Continue';
+    }
+    openModalDialog(els.confirmPurgeLocalImagesModal);
+  }
+
+  async function handleConfirmPurgeLocalImages() {
+    if (purgeLocalImagesStep === 1) {
+      purgeLocalImagesStep = 2;
+      if (els.confirmPurgeLocalImagesTitle) {
+        els.confirmPurgeLocalImagesTitle.textContent = 'Final Confirmation — Delete All Local Images?';
+      }
+      if (els.confirmPurgeLocalImagesMsg) {
+        els.confirmPurgeLocalImagesMsg.textContent =
+          'Are you sure? This action immediately deletes all locally cached packaging and draft photos on this computer and cannot be undone.';
+      }
+      if (els.confirmPurgeLocalImagesBtn) {
+        els.confirmPurgeLocalImagesBtn.textContent = 'Yes, Delete All Local Images';
+      }
+      return;
+    }
+
+    if (els.confirmPurgeLocalImagesBtn) {
+      els.confirmPurgeLocalImagesBtn.disabled = true;
+      els.confirmPurgeLocalImagesBtn.textContent = 'Deleting...';
+    }
+    try {
+      const res = await adminFetch('/api/admin/local-images/clear-all', { method: 'POST' });
+      if (!res.success) throw new Error(res.error || 'Failed to clear local images.');
+      closeModalDialog(els.confirmPurgeLocalImagesModal);
+      renderLocalCleanupStatus(res.stats, {
+        lastRunDate: new Date().toISOString().slice(0, 10),
+        lastRunStatus: `Cleared all local images (${res.deletedFiles} file(s) removed)`
+      });
+      loadDispatches(false);
+      const mb = (res.freedBytes / (1024 * 1024)).toFixed(2);
+      showBanner('success', `Cleared ${res.deletedFiles} local image(s) (${mb} MB freed).`);
+    } catch (err) {
+      closeModalDialog(els.confirmPurgeLocalImagesModal);
+      showBanner('error', `Failed to clear local images: ${err.message}`);
+    } finally {
+      purgeLocalImagesStep = 1;
+      if (els.confirmPurgeLocalImagesBtn) {
+        els.confirmPurgeLocalImagesBtn.disabled = false;
+        els.confirmPurgeLocalImagesBtn.textContent = 'Continue';
+      }
+    }
+  }
+
   async function handleSaveSettings(closeAfter = true) {
     const googleScriptUrl = els.settingsGoogleScriptUrl.value.trim();
     const ocrMode = els.settingsOcrMode.value;
@@ -2762,6 +2904,12 @@
       time: els.dailyEmailTimeInput.value || '15:00'
     };
 
+    const localCleanup = {
+      enabled: els.localCleanupEnabledInput ? els.localCleanupEnabledInput.checked : true,
+      retentionDays: Math.max(1, Math.min(365, parseInt(els.localCleanupDaysInput?.value, 10) || 2)),
+      time: els.localCleanupTimeInput?.value || '20:00'
+    };
+
     try {
       const res = await adminFetch('/api/admin/config', {
         method: 'POST',
@@ -2770,7 +2918,8 @@
           googleScriptUrl,
           ocrMode,
           geminiApiKey: geminiApiKey === '' ? '__CLEAR__' : geminiApiKey,
-          dailyEmail
+          dailyEmail,
+          localCleanup
         })
       });
 
