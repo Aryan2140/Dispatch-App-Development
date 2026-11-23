@@ -2083,6 +2083,16 @@
       }
     }
 
+    const hadPendingImages =
+      fallbackPackagingImages.length > 0 ||
+      Boolean(slipToSend && !isEditing) ||
+      state.packagingItems.some((it) => it.status === 'uploading');
+
+    if (!isEditing && hadPendingImages) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      showBanner('success', `Saving ${trackingNumber} for ${customerName} — images will be processed and synced to Google Sheets.`);
+    }
+
     try {
       const endpoint = isEditing
         ? `/api/dispatches/${encodeURIComponent(targetEditId)}`
@@ -2118,8 +2128,11 @@
       }
 
       const d = res.dispatch;
+      window.scrollTo({ top: 0, behavior: 'smooth' });
       if (isEditing) {
         showBanner('success', `Updated ${d.trackingNumber} for ${d.customerName}.`);
+      } else if (res.syncingInBackground && hadPendingImages) {
+        showBanner('success', `Saved ${d.trackingNumber} for ${d.customerName} — order and images will be processed and synced to Google Sheets.`);
       } else if (res.syncingInBackground) {
         showBanner('success', `Saved ${d.trackingNumber} for ${d.customerName} — syncing to Google Sheets.`);
       } else if (d.syncStatus === 'synced') {
@@ -2132,10 +2145,6 @@
 
       resetDispatchForm(false, false);
       loadDispatches();
-      if (res.syncingInBackground) {
-        setTimeout(() => loadDispatches(false), 4500);
-      }
-      window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       showBanner('error', (isEditing ? 'Update failed: ' : 'Save failed: ') + err.message);
       els.submitDispatchBtn.textContent = isEditing ? 'Update Dispatch' : 'Save Dispatch';
@@ -3920,16 +3929,17 @@
       hideBanner();
     }, 7000);
 
-    // Dismiss on any user scroll after the initial smooth scrollTo(top) settles
+    // Dismiss on any user scroll after smooth scroll-to-top settles
     bannerScrollArmTimer = setTimeout(() => {
       const startY = window.scrollY || 0;
       bannerScrollListener = () => {
-        if (Math.abs((window.scrollY || 0) - startY) > 6) {
+        const curY = window.scrollY || 0;
+        if (Math.abs(curY - startY) > 12) {
           hideBanner();
         }
       };
       window.addEventListener('scroll', bannerScrollListener, { passive: true });
-    }, 650);
+    }, 1150);
   }
 
   function escapeHtml(str) {
