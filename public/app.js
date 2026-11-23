@@ -88,6 +88,7 @@
       'ocrProgressBar',
       'ocrLowCertaintyNotice',
       'trackingSlipEmptyState',
+      'slipCarrierCollapse',
       'carrierSelect',
       'carrierAutoBadge',
       'orderNumberInput',
@@ -116,8 +117,9 @@
       'resetFormBtn',
       'submitDispatchBtn',
       'historySearchInput',
+      'toggleHistoryFiltersBtn',
+      'historyFiltersCollapse',
       'syncHistoryBtn',
-      'openCourierCountsBtn',
       'historyCarrierFilter',
       'historyProductSearchInput',
       'historyProductDropdown',
@@ -553,7 +555,7 @@
       const updateStickyHeader = () => {
         scrollRafId = 0;
         const now = Date.now();
-        if (now - lastToggleAt < 320) return;
+        if (now - lastToggleAt < 420) return;
         const y = window.scrollY || 0;
         if (y > 100 && !headerEl.classList.contains('is-scrolled')) {
           headerEl.classList.add('is-scrolled');
@@ -618,14 +620,47 @@
     els.trackingNumberInput?.addEventListener('input', onTrackingInputAutoCarrier);
     els.trackingNumberInput?.addEventListener('blur', onTrackingInputAutoCarrier);
 
-    // Search History, Filters, Pagination, Courier Counts & Sync
+    // Search History, Filters Drawer, Date Placeholder, Pagination & Sync
     const onHistoryFilterChange = () => {
       state.historyPage = 1;
       renderDispatchesList();
     };
+    const syncHistoryDateEmptyClass = () => {
+      if (!els.historyDateFilter) return;
+      els.historyDateFilter.classList.toggle('is-empty', !els.historyDateFilter.value);
+    };
+    syncHistoryDateEmptyClass();
+
+    let filtersOverflowTimer = null;
+    els.toggleHistoryFiltersBtn?.addEventListener('click', () => {
+      if (!els.historyFiltersCollapse) return;
+      const opening = !els.historyFiltersCollapse.classList.contains('is-open');
+      els.historyFiltersCollapse.classList.toggle('is-open', opening);
+      els.toggleHistoryFiltersBtn.classList.toggle('is-open', opening);
+      els.toggleHistoryFiltersBtn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+      if (filtersOverflowTimer) {
+        clearTimeout(filtersOverflowTimer);
+        filtersOverflowTimer = null;
+      }
+      if (opening) {
+        filtersOverflowTimer = setTimeout(() => {
+          if (els.historyFiltersCollapse?.classList.contains('is-open')) {
+            els.historyFiltersCollapse.classList.add('is-overflow-visible');
+          }
+        }, 290);
+      } else {
+        els.historyFiltersCollapse.classList.remove('is-overflow-visible');
+        els.historyProductDropdown?.classList.add('hidden');
+      }
+    });
+
     els.historySearchInput.addEventListener('input', debounce(onHistoryFilterChange, 120));
     els.historyCarrierFilter?.addEventListener('change', onHistoryFilterChange);
-    els.historyDateFilter?.addEventListener('change', onHistoryFilterChange);
+    els.historyDateFilter?.addEventListener('change', () => {
+      syncHistoryDateEmptyClass();
+      onHistoryFilterChange();
+    });
+    els.historyDateFilter?.addEventListener('input', syncHistoryDateEmptyClass);
 
     // Searchable Multi-Product Filter Dropdown
     els.historyProductSearchInput?.addEventListener('focus', () => renderHistoryProductDropdown());
@@ -645,6 +680,7 @@
       if (els.historyCarrierFilter) els.historyCarrierFilter.value = '';
       if (els.historyProductSearchInput) els.historyProductSearchInput.value = '';
       if (els.historyDateFilter) els.historyDateFilter.value = '';
+      syncHistoryDateEmptyClass();
       state.historySelectedProducts = [];
       renderHistorySelectedProductsChips();
       state.historyPage = 1;
@@ -655,7 +691,6 @@
       state.historyPage = 1;
       renderDispatchesList();
     });
-    els.openCourierCountsBtn?.addEventListener('click', openCourierCountsModal);
     els.headerCourierCountsBtn?.addEventListener('click', openCourierCountsModal);
     els.refreshCourierCountsBtn?.addEventListener('click', loadCourierCounts);
     els.syncHistoryBtn.addEventListener('click', () => loadDispatches(true));
@@ -723,6 +758,10 @@
     return ['Australia Post', 'CouriersPlease', 'StarTrack', 'Aramex', 'Sendle', 'Team Global Express', 'TNT / FedEx', 'DHL', 'Direct Freight', 'Allied Express', 'Other'];
   }
 
+  function setSlipCarrierVisible(visible) {
+    els.slipCarrierCollapse?.classList.toggle('is-visible', Boolean(visible));
+  }
+
   function syncCarrierPlaceholderStyle() {
     if (!els.carrierSelect) return;
     els.carrierSelect.classList.toggle('is-placeholder', !els.carrierSelect.value);
@@ -732,7 +771,7 @@
     if (!els.carrierSelect) return;
     const prevVal = els.carrierSelect.value;
     const carriers = getConfiguredCarriers();
-    els.carrierSelect.innerHTML = `<option value="">(Auto-Detect)</option>` +
+    els.carrierSelect.innerHTML = `<option value="">Select carrier</option>` +
       carriers.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
     if (prevVal && carriers.includes(prevVal)) {
       els.carrierSelect.value = prevVal;
@@ -1183,6 +1222,15 @@
     els.ocrLowCertaintyNotice.classList.add('hidden');
     clearCertaintyMeter('name');
     clearCertaintyMeter('tracking');
+    if (!state.editingDispatchId) {
+      setSlipCarrierVisible(false);
+      state.carrierManuallySelected = false;
+      if (els.carrierSelect) {
+        els.carrierSelect.value = '';
+        syncCarrierPlaceholderStyle();
+      }
+      els.carrierAutoBadge?.classList.add('hidden');
+    }
     updateLocationReminder();
   }
 
@@ -1191,6 +1239,15 @@
       Boolean(state.config.hasGeminiApiKey) &&
       (state.config.ocrMode === 'gemini' || state.config.ocrMode === 'auto') &&
       state.config.geminiStatus?.state !== 'fallback_quota';
+
+    if (!state.carrierManuallySelected) {
+      setSlipCarrierVisible(false);
+      if (els.carrierSelect) {
+        els.carrierSelect.value = '';
+        syncCarrierPlaceholderStyle();
+      }
+      els.carrierAutoBadge?.classList.add('hidden');
+    }
 
     els.ocrProgressBox.classList.remove('hidden');
     els.ocrLowCertaintyNotice.classList.add('hidden');
@@ -1312,6 +1369,7 @@
       }
 
       populateExtractedFields(extracted);
+      setSlipCarrierVisible(true);
 
       const nameCert = Number(extracted.customerNameCertainty) || 0;
       const trackCert = Number(extracted.trackingNumberCertainty) || 0;
@@ -1336,6 +1394,7 @@
 
       setTimeout(() => els.ocrProgressBox.classList.add('hidden'), 1400);
     } catch (err) {
+      setSlipCarrierVisible(true);
       els.ocrProgressBar.className = 'ocr-progress';
       els.ocrProgressBar.value = 100;
       els.ocrStatusText.textContent = 'Host OCR error — enter fields manually';
@@ -2477,7 +2536,6 @@
   }
 
   function updateHistoryFilterCountBadge() {
-    if (!els.historyFilterCountBadge) return;
     const carrier = els.historyCarrierFilter?.value || '';
     const date = els.historyDateFilter?.value || '';
     const activeCount =
@@ -2485,6 +2543,9 @@
       (date ? 1 : 0) +
       state.historySelectedProducts.length;
 
+    els.toggleHistoryFiltersBtn?.classList.toggle('has-active-filters', activeCount > 0);
+
+    if (!els.historyFilterCountBadge) return;
     if (activeCount > 0) {
       els.historyFilterCountBadge.textContent = String(activeCount);
       els.historyFilterCountBadge.classList.remove('hidden');
@@ -2853,6 +2914,7 @@
       clearTrackingSlip();
       state.trackingSlipRemoved = false;
     }
+    setSlipCarrierVisible(true);
 
     state.packagingItems = (Array.isArray(d.localPackagingUrls) ? d.localPackagingUrls : []).map(
       (u, idx) => ({
