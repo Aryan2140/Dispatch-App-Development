@@ -43,10 +43,12 @@
     dispatches: [],
     historyPage: 1,
     historyPageSize: 20,
+    historySelectedProducts: [],
     carrierManuallySelected: false,
     adminCarriers: [],
     editingDispatchId: null,
     trackingSlipBase64: null,
+    trackingSlipDraft: null,
     trackingSlipReplaced: false,
     trackingSlipRemoved: false,
     packagingItems: []
@@ -67,6 +69,8 @@
       'openGoogleSheetLink',
       'wifiAccessBtn',
       'settingsBtn',
+      'headerCourierCountsBtn',
+      'historyFilterCountBadge',
       'editingModeBanner',
       'editingModeText',
       'cancelEditDispatchBtn',
@@ -115,9 +119,10 @@
       'syncHistoryBtn',
       'openCourierCountsBtn',
       'historyCarrierFilter',
-      'historyProductFilter',
+      'historyProductSearchInput',
+      'historyProductDropdown',
+      'historySelectedProductsChips',
       'historyDateFilter',
-      'historyStaffFilter',
       'clearHistoryFiltersBtn',
       'historyResultsSummary',
       'historyPageSizeSelect',
@@ -152,7 +157,8 @@
       'adminPanelBody',
       'adminPanelFooter',
       'dailyEmailEnabledInput',
-      'dailyEmailAdminInput',
+      'dailyEmailRecipientsList',
+      'addEmailRecipientBtn',
       'dailyEmailTimeInput',
       'previewDailySummaryBtn',
       'sendDailySummaryNowBtn',
@@ -486,6 +492,7 @@
           p.classList.toggle('active', isMatch);
           p.hidden = !isMatch;
         });
+        hideBanner();
         if (targetId === 'historyTab') loadDispatches();
       });
     });
@@ -610,15 +617,28 @@
     };
     els.historySearchInput.addEventListener('input', debounce(onHistoryFilterChange, 120));
     els.historyCarrierFilter?.addEventListener('change', onHistoryFilterChange);
-    els.historyProductFilter?.addEventListener('change', onHistoryFilterChange);
     els.historyDateFilter?.addEventListener('change', onHistoryFilterChange);
-    els.historyStaffFilter?.addEventListener('change', onHistoryFilterChange);
+
+    // Searchable Multi-Product Filter Dropdown
+    els.historyProductSearchInput?.addEventListener('focus', () => renderHistoryProductDropdown());
+    els.historyProductSearchInput?.addEventListener('input', () => renderHistoryProductDropdown());
+    document.addEventListener('click', (e) => {
+      if (
+        els.historyProductDropdown &&
+        !els.historyProductDropdown.classList.contains('hidden') &&
+        !e.target.closest('.history-product-filter-wrap')
+      ) {
+        els.historyProductDropdown.classList.add('hidden');
+      }
+    });
+
     els.clearHistoryFiltersBtn?.addEventListener('click', () => {
       if (els.historySearchInput) els.historySearchInput.value = '';
       if (els.historyCarrierFilter) els.historyCarrierFilter.value = '';
-      if (els.historyProductFilter) els.historyProductFilter.value = '';
+      if (els.historyProductSearchInput) els.historyProductSearchInput.value = '';
       if (els.historyDateFilter) els.historyDateFilter.value = '';
-      if (els.historyStaffFilter) els.historyStaffFilter.value = '';
+      state.historySelectedProducts = [];
+      renderHistorySelectedProductsChips();
       state.historyPage = 1;
       renderDispatchesList();
     });
@@ -628,6 +648,7 @@
       renderDispatchesList();
     });
     els.openCourierCountsBtn?.addEventListener('click', openCourierCountsModal);
+    els.headerCourierCountsBtn?.addEventListener('click', openCourierCountsModal);
     els.refreshCourierCountsBtn?.addEventListener('click', loadCourierCounts);
     els.syncHistoryBtn.addEventListener('click', () => loadDispatches(true));
     els.confirmDeleteBtn.addEventListener('click', handleConfirmDeleteDispatch);
@@ -648,6 +669,16 @@
     els.copyAppsScriptBtn.addEventListener('click', handleCopyAppsScript);
     els.previewDailySummaryBtn.addEventListener('click', handlePreviewDailySummary);
     els.sendDailySummaryNowBtn.addEventListener('click', handleSendDailySummaryNow);
+    els.addEmailRecipientBtn?.addEventListener('click', () => {
+      const nextNum = (state.adminEmailRecipients?.length || 0) + 1;
+      state.adminEmailRecipients = [
+        ...(state.adminEmailRecipients || []),
+        { label: `Inbox ${nextNum}`, email: '' }
+      ];
+      renderDailyEmailRecipients();
+      const inputs = els.dailyEmailRecipientsList?.querySelectorAll('.email-recipient-address');
+      inputs?.[inputs.length - 1]?.focus();
+    });
     els.changeAdminPasswordBtn.addEventListener('click', handleChangeAdminPassword);
     els.testGeminiBtn?.addEventListener('click', handleTestGemini);
     els.runLocalCleanupNowBtn?.addEventListener('click', handleRunLocalCleanupNow);
@@ -1061,11 +1092,53 @@
     }
   }
 
+  function uploadDraftTrackingSlip(dataUrl) {
+    if (state.trackingSlipDraft) {
+      discardDraftPackagingPhoto(state.trackingSlipDraft);
+      state.trackingSlipDraft = null;
+    }
+    const draft = {
+      draftId: `slip-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      driveFileId: '',
+      driveUrl: '',
+      status: 'uploading',
+      discarded: false
+    };
+    state.trackingSlipDraft = draft;
+    fetch('/api/draft-photos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draftId: draft.draftId, imageBase64: dataUrl })
+    })
+      .then((r) => r.json())
+      .then((res) => {
+        if (draft.discarded) {
+          if (res?.driveFileId) {
+            discardDraftPackagingPhoto({ draftId: draft.draftId, driveFileId: res.driveFileId });
+          }
+          return;
+        }
+        if (res && res.success) {
+          draft.driveFileId = res.driveFileId || '';
+          draft.driveUrl = res.driveUrl || '';
+          draft.status = 'ready';
+        } else {
+          draft.status = 'local';
+        }
+      })
+      .catch(() => {
+        draft.status = 'local';
+      });
+  }
+
   function setTrackingSlipImage(dataUrl, isNewUpload = false) {
     state.trackingSlipBase64 = dataUrl;
     if (isNewUpload) {
       state.trackingSlipReplaced = true;
       state.trackingSlipRemoved = false;
+      if (dataUrl && dataUrl.startsWith('data:')) {
+        uploadDraftTrackingSlip(dataUrl);
+      }
     }
     els.trackingSlipPreviewImg.src = dataUrl;
     els.trackingSlipPreviewContainer.classList.remove('hidden');
@@ -1074,7 +1147,12 @@
     updateLocationReminder();
   }
 
-  function clearTrackingSlip() {
+  function clearTrackingSlip(discardDraft = true) {
+    if (discardDraft && state.trackingSlipDraft) {
+      state.trackingSlipDraft.discarded = true;
+      discardDraftPackagingPhoto(state.trackingSlipDraft);
+    }
+    state.trackingSlipDraft = null;
     state.trackingSlipBase64 = null;
     if (state.editingDispatchId) {
       state.trackingSlipRemoved = true;
@@ -1888,14 +1966,6 @@
     els.submitDispatchBtn.disabled = true;
     els.submitDispatchBtn.textContent = isEditing ? 'Updating...' : 'Saving...';
 
-    // Wait briefly for any in-flight background draft photo uploads to finish
-    const pendingUploads = state.packagingItems
-      .filter((it) => it.uploadPromise && it.status === 'uploading')
-      .map((it) => it.uploadPromise);
-    if (pendingUploads.length > 0) {
-      await Promise.allSettled(pendingUploads);
-    }
-
     const keptPackagingUrls = [];
     const packagingDrafts = [];
     const fallbackPackagingImages = [];
@@ -1910,11 +1980,34 @@
           driveUrl: item.driveUrl || ''
         });
       } else if (item.dataUrl) {
+        // Still uploading or local-only: send directly so Save doesn't block; discard late draft
         fallbackPackagingImages.push(item.dataUrl);
+        if (item.status === 'uploading' && item.uploadPromise) {
+          const lateItem = item;
+          item.uploadPromise.then(() => {
+            if (lateItem.driveFileId || lateItem.draftId) discardDraftPackagingPhoto(lateItem);
+          });
+        }
       }
     }
 
-    const slipToSend = !isEditing || state.trackingSlipReplaced ? state.trackingSlipBase64 : null;
+    const shouldIncludeSlip = !isEditing || state.trackingSlipReplaced;
+    let trackingSlipDraft = null;
+    let slipToSend = null;
+    if (shouldIncludeSlip && state.trackingSlipBase64) {
+      if (!isEditing && state.trackingSlipDraft && state.trackingSlipDraft.status === 'ready') {
+        trackingSlipDraft = {
+          draftId: state.trackingSlipDraft.draftId,
+          driveFileId: state.trackingSlipDraft.driveFileId || '',
+          driveUrl: state.trackingSlipDraft.driveUrl || ''
+        };
+      } else {
+        slipToSend = state.trackingSlipBase64;
+        if (state.trackingSlipDraft) {
+          state.trackingSlipDraft.discarded = true;
+        }
+      }
+    }
 
     try {
       const endpoint = isEditing
@@ -1930,6 +2023,7 @@
         orderDate,
         staffName: state.staffName,
         products,
+        trackingSlipDraft,
         trackingSlipImage: slipToSend,
         packagingDrafts,
         packagingImages: fallbackPackagingImages
@@ -1950,44 +2044,10 @@
       }
 
       const d = res.dispatch;
-      if (!isEditing && d.syncStatus === 'pending_sync' && state.config.googleScriptUrl && isHostNetworkFailure(d.syncError)) {
-        try {
-          const gsRes = await callAppsScriptPost(state.config.googleScriptUrl, {
-            action: 'createDispatch',
-            dispatchId: d.dispatchId,
-            orderNumber: d.orderNumber || '',
-            orderDate: d.orderDate,
-            trackingNumber: d.trackingNumber,
-            carrier: d.carrier || carrier || '',
-            customerName: d.customerName,
-            staffName: d.staffName,
-            products: d.products,
-            trackingSlipImage: slipToSend || null,
-            preUploadedPackaging: packagingDrafts
-              .filter((x) => x.driveFileId)
-              .map((x) => ({ fileId: x.driveFileId, url: x.driveUrl })),
-            packagingImages: fallbackPackagingImages
-          });
-          if (gsRes && gsRes.success) {
-            d.syncStatus = 'synced';
-            d.syncError = null;
-            await syncClientResultToServer({
-              dispatchUpdate: {
-                dispatchId: d.dispatchId,
-                driveFolderUrl: gsRes.driveFolderUrl || '',
-                trackingSlipDriveUrl: gsRes.trackingSlipUrl || '',
-                packagingDriveUrls: gsRes.packagingImageUrls || [],
-                sheetRowNumber: gsRes.rowNumber || null
-              }
-            });
-          }
-        } catch (fallbackErr) {
-          console.warn('Browser dispatch sync fallback error:', fallbackErr);
-        }
-      }
-
       if (isEditing) {
         showBanner('success', `Updated ${d.trackingNumber} for ${d.customerName}.`);
+      } else if (res.syncingInBackground) {
+        showBanner('success', `Saved ${d.trackingNumber} for ${d.customerName} — syncing to Google Sheets.`);
       } else if (d.syncStatus === 'synced') {
         showBanner('success', `Saved ${d.trackingNumber} for ${d.customerName} and synced to Google Sheets.`);
       } else if (d.syncStatus === 'pending_sync') {
@@ -1997,7 +2057,10 @@
       }
 
       resetDispatchForm(false, false);
-      await loadDispatches();
+      loadDispatches();
+      if (res.syncingInBackground) {
+        setTimeout(() => loadDispatches(false), 4500);
+      }
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
       showBanner('error', (isEditing ? 'Update failed: ' : 'Save failed: ') + err.message);
@@ -2021,7 +2084,7 @@
     if (els.submitDispatchBtn) els.submitDispatchBtn.textContent = 'Save Dispatch';
     if (els.resetFormBtn) els.resetFormBtn.textContent = 'Clear';
 
-    clearTrackingSlip();
+    clearTrackingSlip(discardDrafts);
     els.dispatchForm?.reset();
     if (els.carrierSelect) els.carrierSelect.value = '';
     els.carrierAutoBadge?.classList.add('hidden');
@@ -2035,7 +2098,7 @@
     renderPackagingGallery();
     resetFormValidation(els.dispatchForm);
     updateOrderNumberReminder();
-    if (clearBanner) els.dispatchAlertBanner.classList.add('hidden');
+    if (clearBanner) hideBanner();
   }
 
   // ==========================================================================
@@ -2242,69 +2305,208 @@
 
   function populateHistoryFilterOptions() {
     const carrierSet = new Set(getConfiguredCarriers().filter((c) => c && c !== 'Other'));
-    const productSet = new Set();
-    const staffSet = new Set();
 
     for (const d of state.dispatches) {
       const resolvedCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
       if (resolvedCarrier) carrierSet.add(resolvedCarrier);
+    }
 
-      const staff = (d.staffName || d.staffMember || '').trim();
-      if (staff) staffSet.add(staff);
+    if (els.historyCarrierFilter) {
+      const cur = els.historyCarrierFilter.value;
+      const sorted = Array.from(carrierSet).sort((a, b) => a.localeCompare(b));
+      els.historyCarrierFilter.innerHTML =
+        `<option value="">All Couriers</option>` +
+        sorted.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+      if (cur && sorted.includes(cur)) els.historyCarrierFilter.value = cur;
+    }
+  }
 
-      if (Array.isArray(d.products)) {
-        for (const p of d.products) {
-          const pname = String(p?.name || '').trim();
-          if (pname) productSet.add(pname);
+  function getHistorySearchableProducts() {
+    const map = new Map();
+    for (const p of state.productsCatalog || []) {
+      const name = String(p?.name || '').trim();
+      const sku = String(p?.sku || '').trim();
+      const category = String(p?.category || '').trim();
+      if (!name) continue;
+      const key = (sku || name).toLowerCase();
+      if (!map.has(key)) {
+        map.set(key, { key, sku, name, category });
+      }
+    }
+    for (const d of state.dispatches || []) {
+      if (!Array.isArray(d.products)) continue;
+      for (const p of d.products) {
+        const name = String(p?.name || '').trim();
+        const sku = String(p?.sku || '').trim();
+        if (!name) continue;
+        const key = (sku || name).toLowerCase();
+        if (!map.has(key)) {
+          map.set(key, { key, sku, name, category: '' });
         }
       }
     }
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }
 
-    const fillSelect = (selectEl, defaultLabel, items) => {
-      if (!selectEl) return;
-      const cur = selectEl.value;
-      const sorted = Array.from(items).sort((a, b) => a.localeCompare(b));
-      selectEl.innerHTML =
-        `<option value="">${escapeHtml(defaultLabel)}</option>` +
-        sorted.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
-      if (cur && sorted.includes(cur)) selectEl.value = cur;
-    };
+  function renderHistoryProductDropdown() {
+    if (!els.historyProductDropdown || !els.historyProductSearchInput) return;
+    const q = els.historyProductSearchInput.value.trim().toLowerCase();
+    const selectedKeys = new Set(state.historySelectedProducts.map((item) => item.key));
+    const all = getHistorySearchableProducts().filter((p) => !selectedKeys.has(p.key));
 
-    fillSelect(els.historyCarrierFilter, 'All Couriers', carrierSet);
-    fillSelect(els.historyProductFilter, 'All Products', productSet);
-    fillSelect(els.historyStaffFilter, 'All Staff', staffSet);
+    const matches = (q
+      ? all.filter(
+          (p) =>
+            p.name.toLowerCase().includes(q) ||
+            (p.sku && p.sku.toLowerCase().includes(q)) ||
+            (p.category && p.category.toLowerCase().includes(q))
+        )
+      : all
+    ).slice(0, 25);
+
+    if (matches.length === 0) {
+      els.historyProductDropdown.innerHTML = `<div class="product-option" style="color:var(--ink-3);cursor:default;">No matching products</div>`;
+      els.historyProductDropdown.classList.remove('hidden');
+      return;
+    }
+
+    els.historyProductDropdown.innerHTML = matches
+      .map(
+        (p, idx) => `
+          <button type="button" class="product-option" role="option" data-hist-prod-idx="${idx}">
+            <span class="product-opt-name">${escapeHtml(p.name)}</span>
+            <span class="product-opt-sku">${escapeHtml(p.sku || '')}${p.category ? (p.sku ? ' · ' : '') + escapeHtml(p.category) : ''}</span>
+          </button>
+        `
+      )
+      .join('');
+
+    els.historyProductDropdown.classList.remove('hidden');
+    els.historyProductDropdown.querySelectorAll('[data-hist-prod-idx]').forEach((btn) => {
+      btn.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const idx = parseInt(btn.getAttribute('data-hist-prod-idx'), 10);
+        const picked = matches[idx];
+        if (!picked) return;
+        state.historySelectedProducts.push({
+          key: picked.key,
+          sku: picked.sku,
+          name: picked.name,
+          qty: ''
+        });
+        els.historyProductSearchInput.value = '';
+        els.historyProductDropdown.classList.add('hidden');
+        renderHistorySelectedProductsChips();
+        state.historyPage = 1;
+        renderDispatchesList();
+      });
+    });
+  }
+
+  function renderHistorySelectedProductsChips() {
+    if (!els.historySelectedProductsChips) return;
+    if (state.historySelectedProducts.length === 0) {
+      els.historySelectedProductsChips.classList.add('hidden');
+      els.historySelectedProductsChips.innerHTML = '';
+      return;
+    }
+
+    els.historySelectedProductsChips.classList.remove('hidden');
+    els.historySelectedProductsChips.innerHTML = state.historySelectedProducts
+      .map(
+        (item, idx) => `
+          <span class="history-prod-chip">
+            <span class="history-prod-chip-name" title="${escapeHtml(item.name)}${item.sku ? ' (' + escapeHtml(item.sku) + ')' : ''}">${escapeHtml(item.name)}</span>
+            <label class="history-prod-qty-label">
+              <span>Qty:</span>
+              <input
+                type="number"
+                min="1"
+                step="1"
+                placeholder="Any"
+                value="${escapeHtml(item.qty)}"
+                class="history-prod-qty-input"
+                data-hist-qty-idx="${idx}"
+                aria-label="Optional quantity for ${escapeHtml(item.name)}"
+              />
+            </label>
+            <button type="button" class="carrier-chip-remove" data-hist-remove-idx="${idx}" aria-label="Remove ${escapeHtml(item.name)} filter">&times;</button>
+          </span>
+        `
+      )
+      .join('');
+
+    els.historySelectedProductsChips.querySelectorAll('[data-hist-qty-idx]').forEach((input) => {
+      input.addEventListener('input', () => {
+        const idx = parseInt(input.getAttribute('data-hist-qty-idx'), 10);
+        if (!state.historySelectedProducts[idx]) return;
+        state.historySelectedProducts[idx].qty = input.value.trim();
+        state.historyPage = 1;
+        renderDispatchesList();
+      });
+    });
+
+    els.historySelectedProductsChips.querySelectorAll('[data-hist-remove-idx]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const idx = parseInt(btn.getAttribute('data-hist-remove-idx'), 10);
+        if (Number.isNaN(idx)) return;
+        state.historySelectedProducts.splice(idx, 1);
+        renderHistorySelectedProductsChips();
+        state.historyPage = 1;
+        renderDispatchesList();
+      });
+    });
+  }
+
+  function updateHistoryFilterCountBadge() {
+    if (!els.historyFilterCountBadge) return;
+    const carrier = els.historyCarrierFilter?.value || '';
+    const date = els.historyDateFilter?.value || '';
+    const activeCount =
+      (carrier ? 1 : 0) +
+      (date ? 1 : 0) +
+      state.historySelectedProducts.length;
+
+    if (activeCount > 0) {
+      els.historyFilterCountBadge.textContent = String(activeCount);
+      els.historyFilterCountBadge.classList.remove('hidden');
+    } else {
+      els.historyFilterCountBadge.textContent = '';
+      els.historyFilterCountBadge.classList.add('hidden');
+    }
   }
 
   function getFilteredDispatches() {
     const q = (els.historySearchInput?.value || '').trim().toLowerCase();
     const carrier = els.historyCarrierFilter?.value || '';
-    const product = els.historyProductFilter?.value || '';
     const date = els.historyDateFilter?.value || '';
-    const staff = els.historyStaffFilter?.value || '';
 
-    const hasAnyFilter = Boolean(q || carrier || product || date || staff);
-    if (els.clearHistoryFiltersBtn) {
-      els.clearHistoryFiltersBtn.classList.toggle('hidden', !hasAnyFilter);
-    }
+    updateHistoryFilterCountBadge();
 
     return state.dispatches.filter((d) => {
       const resolvedCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
       if (carrier && resolvedCarrier !== carrier) return false;
 
-      if (product) {
-        const hasProd = Array.isArray(d.products) && d.products.some((p) => String(p?.name || '').trim() === product);
-        if (!hasProd) return false;
+      if (state.historySelectedProducts.length > 0) {
+        const dProds = Array.isArray(d.products) ? d.products : [];
+        const matchesAllSelected = state.historySelectedProducts.every((pf) => {
+          const targetQty = parseInt(pf.qty, 10);
+          const hasQtyFilter = !Number.isNaN(targetQty) && targetQty > 0;
+          return dProds.some((p) => {
+            const skuMatch = pf.sku && p.sku && String(p.sku).trim().toLowerCase() === pf.sku.toLowerCase();
+            const nameMatch = p.name && String(p.name).trim().toLowerCase() === pf.name.toLowerCase();
+            if (!skuMatch && !nameMatch) return false;
+            if (hasQtyFilter && Number(p.quantity) !== targetQty) return false;
+            return true;
+          });
+        });
+        if (!matchesAllSelected) return false;
       }
 
       if (date) {
         const oDate = String(d.orderDate || '').slice(0, 10);
         const tDate = String(d.timestamp || '').slice(0, 10);
         if (oDate !== date && tDate !== date) return false;
-      }
-
-      if (staff) {
-        const sName = (d.staffName || d.staffMember || '').trim();
-        if (sName !== staff) return false;
       }
 
       if (q) {
@@ -2415,9 +2617,12 @@
     els.dispatchesListContainer.innerHTML = pageList
       .map((d) => {
         const isSynced = d.syncStatus === 'synced';
+        const isSyncing = d.syncStatus === 'syncing';
         const syncPill = isSynced
           ? `<span class="sync-pill ok">Synced</span>`
-          : `<span class="sync-pill pending">Local</span>`;
+          : isSyncing
+            ? `<span class="sync-pill pending">Syncing...</span>`
+            : `<span class="sync-pill pending">Local</span>`;
 
         const resolvedCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
         const carrierPill = resolvedCarrier
@@ -2449,7 +2654,7 @@
           });
         }
 
-        const retryBtn = !isSynced
+        const retryBtn = !isSynced && !isSyncing
           ? `<button type="button" class="btn btn-xs btn-outline" data-sync-id="${escapeHtml(d.dispatchId)}">Sync</button>`
           : '';
 
@@ -2797,8 +3002,23 @@
 
       const de = c.dailyEmail || {};
       els.dailyEmailEnabledInput.checked = de.enabled !== false;
-      els.dailyEmailAdminInput.value = de.adminEmail || '';
       els.dailyEmailTimeInput.value = de.time || '15:00';
+      if (Array.isArray(de.recipients) && de.recipients.length > 0) {
+        state.adminEmailRecipients = de.recipients.map((r, i) => ({
+          label: String(r?.label || '').trim() || (i === 0 ? 'Bookkeeping' : i === 1 ? 'On-Hand Staff' : `Inbox ${i + 1}`),
+          email: String(r?.email || '').trim()
+        }));
+      } else {
+        const legacy = String(de.adminEmail || '').split(/[,;]+/).map((s) => s.trim()).filter(Boolean);
+        state.adminEmailRecipients = [
+          { label: 'Bookkeeping', email: legacy[0] || '' },
+          { label: 'On-Hand Staff', email: legacy[1] || '' }
+        ];
+        for (let i = 2; i < legacy.length; i++) {
+          state.adminEmailRecipients.push({ label: `Inbox ${i + 1}`, email: legacy[i] });
+        }
+      }
+      renderDailyEmailRecipients();
 
       if (de.lastSentDate || de.lastSentError) {
         els.dailyEmailStatusNote.classList.remove('hidden');
@@ -2825,6 +3045,69 @@
     } catch (err) {
       return false;
     }
+  }
+
+  function renderDailyEmailRecipients() {
+    if (!els.dailyEmailRecipientsList) return;
+    const list = Array.isArray(state.adminEmailRecipients) && state.adminEmailRecipients.length > 0
+      ? state.adminEmailRecipients
+      : [
+          { label: 'Bookkeeping', email: '' },
+          { label: 'On-Hand Staff', email: '' }
+        ];
+    state.adminEmailRecipients = list;
+
+    els.dailyEmailRecipientsList.innerHTML = list
+      .map(
+        (r, idx) => `
+          <div class="email-recipient-row" data-email-row-idx="${idx}">
+            <input
+              type="text"
+              class="email-recipient-label"
+              value="${escapeHtml(r.label)}"
+              placeholder="Label (e.g. Bookkeeping)"
+              aria-label="Inbox label ${idx + 1}"
+            />
+            <input
+              type="email"
+              class="email-recipient-address"
+              value="${escapeHtml(r.email)}"
+              placeholder="${idx === 0 ? 'bookkeeping@aimex.com.au' : idx === 1 ? 'staff@aimex.com.au' : 'email@aimex.com.au'}"
+              autocomplete="email"
+              aria-label="Inbox email ${idx + 1}"
+            />
+            <button
+              type="button"
+              class="btn btn-xs btn-outline remove-email-recipient-btn"
+              data-remove-email-idx="${idx}"
+              aria-label="Remove inbox ${escapeHtml(r.label)}"
+              ${list.length <= 1 ? 'disabled' : ''}
+            >&times;</button>
+          </div>
+        `
+      )
+      .join('');
+
+    els.dailyEmailRecipientsList.querySelectorAll('.email-recipient-row').forEach((row) => {
+      const idx = parseInt(row.getAttribute('data-email-row-idx'), 10);
+      row.querySelector('.email-recipient-label')?.addEventListener('input', (e) => {
+        if (state.adminEmailRecipients[idx]) state.adminEmailRecipients[idx].label = e.target.value;
+      });
+      row.querySelector('.email-recipient-address')?.addEventListener('input', (e) => {
+        if (state.adminEmailRecipients[idx]) state.adminEmailRecipients[idx].email = e.target.value;
+      });
+    });
+
+    els.dailyEmailRecipientsList.querySelectorAll('[data-remove-email-idx]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (state.adminEmailRecipients.length <= 1) return;
+        const idx = parseInt(btn.getAttribute('data-remove-email-idx'), 10);
+        if (!Number.isNaN(idx)) {
+          state.adminEmailRecipients.splice(idx, 1);
+          renderDailyEmailRecipients();
+        }
+      });
+    });
   }
 
   function renderAdminCarriersList() {
@@ -3352,9 +3635,16 @@
     const ocrMode = els.settingsOcrMode.value;
     const geminiApiKey = els.settingsGeminiApiKey.value.trim();
 
+    const recipients = (state.adminEmailRecipients || []).map((r, i) => ({
+      label: String(r?.label || '').trim() || (i === 0 ? 'Bookkeeping' : i === 1 ? 'On-Hand Staff' : `Inbox ${i + 1}`),
+      email: String(r?.email || '').trim()
+    }));
+    const joinedEmails = recipients.map((r) => r.email).filter(Boolean).join(', ');
+
     const dailyEmail = {
       enabled: els.dailyEmailEnabledInput.checked,
-      adminEmail: els.dailyEmailAdminInput.value.trim(),
+      adminEmail: joinedEmails,
+      recipients,
       time: els.dailyEmailTimeInput.value || '15:00'
     };
 
@@ -3474,7 +3764,28 @@
     openModalDialog(els.lightboxModal);
   }
 
+  let bannerAutoHideTimer = null;
+  let bannerScrollArmTimer = null;
+  let bannerScrollListener = null;
+
+  function hideBanner() {
+    if (bannerAutoHideTimer) {
+      clearTimeout(bannerAutoHideTimer);
+      bannerAutoHideTimer = null;
+    }
+    if (bannerScrollArmTimer) {
+      clearTimeout(bannerScrollArmTimer);
+      bannerScrollArmTimer = null;
+    }
+    if (bannerScrollListener) {
+      window.removeEventListener('scroll', bannerScrollListener);
+      bannerScrollListener = null;
+    }
+    els.dispatchAlertBanner?.classList.add('hidden');
+  }
+
   function showBanner(type, message) {
+    hideBanner();
     els.dispatchAlertBanner.className = `alert-banner alert-${type}`;
     els.dispatchAlertBanner.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
     els.dispatchAlertBanner.innerHTML = '';
@@ -3487,12 +3798,26 @@
     closeBtn.className = 'btn btn-xs btn-outline';
     closeBtn.setAttribute('aria-label', 'Dismiss notice');
     closeBtn.textContent = '×';
-    closeBtn.addEventListener('click', () => {
-      els.dispatchAlertBanner.classList.add('hidden');
-    });
+    closeBtn.addEventListener('click', hideBanner);
 
     els.dispatchAlertBanner.append(textSpan, closeBtn);
     els.dispatchAlertBanner.classList.remove('hidden');
+
+    // Auto-dismiss after 7 seconds
+    bannerAutoHideTimer = setTimeout(() => {
+      hideBanner();
+    }, 7000);
+
+    // Dismiss on any user scroll after the initial smooth scrollTo(top) settles
+    bannerScrollArmTimer = setTimeout(() => {
+      const startY = window.scrollY || 0;
+      bannerScrollListener = () => {
+        if (Math.abs((window.scrollY || 0) - startY) > 6) {
+          hideBanner();
+        }
+      };
+      window.addEventListener('scroll', bannerScrollListener, { passive: true });
+    }, 650);
   }
 
   function escapeHtml(str) {

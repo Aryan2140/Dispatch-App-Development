@@ -270,16 +270,32 @@ function doPost(e) {
     }
 
     if (action === 'sendDailySummary') {
-      const adminEmail = String(body.adminEmail || '').trim();
-      if (!adminEmail) {
-        return jsonResponse_({ success: false, error: 'Administrator email is required.' });
+      const seenEmails = {};
+      const emailList = [];
+      const addEmails = (raw) => {
+        String(raw || '').split(/[,;]+/).forEach((part) => {
+          const e = part.trim();
+          if (e && !seenEmails[e.toLowerCase()]) {
+            seenEmails[e.toLowerCase()] = true;
+            emailList.push(e);
+          }
+        });
+      };
+      if (Array.isArray(body.recipients)) {
+        body.recipients.forEach((r) => addEmails(typeof r === 'string' ? r : (r && r.email)));
       }
+      addEmails(body.adminEmail);
+
+      if (emailList.length === 0) {
+        return jsonResponse_({ success: false, error: 'At least one recipient email is required.' });
+      }
+      const toAddress = emailList.join(',');
       const dateStr = String(body.date || Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyy-MM-dd')).trim();
       const summary = body.summary || aggregateDayFromSheet_(ss, dateStr);
-      sendSummaryEmail_(adminEmail, dateStr, summary, ss.getUrl());
+      sendSummaryEmail_(toAddress, dateStr, summary, ss.getUrl());
       return jsonResponse_({
         success: true,
-        sentTo: adminEmail,
+        sentTo: emailList.join(', '),
         date: dateStr,
         totalOrders: summary.totalOrders || 0,
         totalUnits: summary.totalUnits || 0
@@ -356,7 +372,19 @@ function doPost(e) {
       let trackingSlipDriveUrl = '';
       let trackingSlipThumbId = '';
 
-      if (body.trackingSlipImage) {
+      if (body.preUploadedTrackingSlip && body.preUploadedTrackingSlip.fileId) {
+        try {
+          const slipFile = DriveApp.getFileById(String(body.preUploadedTrackingSlip.fileId));
+          slipFile.moveTo(dispatchFolder);
+          slipFile.setName(`TrackingSlip_${safeTrack}.jpg`);
+          trackingSlipDriveUrl = slipFile.getUrl();
+          trackingSlipThumbId = slipFile.getId();
+        } catch (e) {
+          if (body.preUploadedTrackingSlip.url) {
+            trackingSlipDriveUrl = String(body.preUploadedTrackingSlip.url);
+          }
+        }
+      } else if (body.trackingSlipImage) {
         const savedSlip = saveBase64ImageToFolder_(
           dispatchFolder,
           body.trackingSlipImage,
@@ -778,6 +806,15 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
     });
   }
 
+  plainLines.push('', 'COURIER PARCEL TOTALS:');
+  if (byCourier.length === 0) {
+    plainLines.push('  No parcels dispatched today.');
+  } else {
+    byCourier.forEach((c) => {
+      plainLines.push(`  - ${c.carrier || 'Unspecified'}: ${c.parcels} parcel(s)`);
+    });
+  }
+
   if (sheetUrl) {
     plainLines.push('', `Google Sheet: ${sheetUrl}`);
   }
@@ -862,6 +899,17 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
             <tbody>${staffRowsHtml}</tbody>
           </table>
         ` : ''}
+
+        <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Courier Parcel Totals</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
+          <thead>
+            <tr style="background:#fef9c3;color:#001e34;text-align:left;">
+              <th style="padding:8px 12px;">Courier</th>
+              <th style="padding:8px 12px;text-align:right;">Parcels</th>
+            </tr>
+          </thead>
+          <tbody>${courierRowsHtml}</tbody>
+        </table>
 
         ${sheetUrl ? `<p style="margin:12px 0 0;"><a href="${sheetUrl}" style="display:inline-block;background:#001e34;color:#fdd400;text-decoration:none;padding:9px 14px;border-radius:6px;font-weight:bold;font-size:13px;">Open Google Sheet</a></p>` : ''}
       </div>

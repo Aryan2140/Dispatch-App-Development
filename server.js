@@ -68,6 +68,10 @@ const DEFAULT_CONFIG = {
   dailyEmail: {
     enabled: true,
     adminEmail: '',
+    recipients: [
+      { label: 'Bookkeeping', email: '' },
+      { label: 'On-Hand Staff', email: '' }
+    ],
     time: '15:00',
     lastSentDate: '',
     lastSentStatus: '',
@@ -108,6 +112,53 @@ function writeJsonFile(filePath, data) {
   fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
+function normalizeEmailRecipients(rawRecipients, fallbackAdminEmail = '') {
+  if (Array.isArray(rawRecipients) && rawRecipients.length > 0) {
+    return rawRecipients
+      .map((item, idx) => {
+        if (typeof item === 'string') {
+          return { label: idx === 0 ? 'Bookkeeping' : idx === 1 ? 'On-Hand Staff' : `Inbox ${idx + 1}`, email: item.trim() };
+        }
+        return {
+          label: String(item?.label || '').trim() || (idx === 0 ? 'Bookkeeping' : idx === 1 ? 'On-Hand Staff' : `Inbox ${idx + 1}`),
+          email: String(item?.email || '').trim()
+        };
+      });
+  }
+  const existingEmails = String(fallbackAdminEmail || '')
+    .split(/[,;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const rows = [
+    { label: 'Bookkeeping', email: existingEmails[0] || '' },
+    { label: 'On-Hand Staff', email: existingEmails[1] || '' }
+  ];
+  for (let i = 2; i < existingEmails.length; i++) {
+    rows.push({ label: `Inbox ${i + 1}`, email: existingEmails[i] });
+  }
+  return rows;
+}
+
+function getConfiguredEmailList(dailyEmail) {
+  const seen = new Set();
+  const emails = [];
+  const addEmail = (raw) => {
+    for (const part of String(raw || '').split(/[,;]+/)) {
+      const e = part.trim();
+      if (!e || seen.has(e.toLowerCase())) continue;
+      seen.add(e.toLowerCase());
+      emails.push(e);
+    }
+  };
+  if (Array.isArray(dailyEmail?.recipients)) {
+    dailyEmail.recipients.forEach((r) => addEmail(typeof r === 'string' ? r : r?.email));
+  }
+  if (emails.length === 0 && dailyEmail?.adminEmail) {
+    addEmail(dailyEmail.adminEmail);
+  }
+  return emails;
+}
+
 function getConfig() {
   const cfg = readJsonFile(CONFIG_FILE, DEFAULT_CONFIG);
   let changed = false;
@@ -117,6 +168,10 @@ function getConfig() {
   }
   if (!cfg.dailyEmail || typeof cfg.dailyEmail !== 'object') {
     cfg.dailyEmail = { ...DEFAULT_CONFIG.dailyEmail };
+    changed = true;
+  }
+  if (!Array.isArray(cfg.dailyEmail.recipients) || cfg.dailyEmail.recipients.length === 0) {
+    cfg.dailyEmail.recipients = normalizeEmailRecipients(null, cfg.dailyEmail.adminEmail);
     changed = true;
   }
   if (!cfg.localCleanup || typeof cfg.localCleanup !== 'object') {
@@ -448,9 +503,10 @@ function computeCourierCountsForWindow(dispatches, config, now = new Date()) {
 
 async function sendDailySummaryEmail(dateStr) {
   const config = getConfig();
-  const adminEmail = String(config.dailyEmail?.adminEmail || '').trim();
-  if (!adminEmail) {
-    throw new Error('Administrator email is not configured.');
+  const emailList = getConfiguredEmailList(config.dailyEmail);
+  const adminEmail = emailList.join(', ');
+  if (emailList.length === 0) {
+    throw new Error('At least one recipient email inbox must be configured.');
   }
   if (!config.googleScriptUrl) {
     throw new Error('Google Sheet Web App URL is not connected (used to send emails).');
@@ -460,6 +516,7 @@ async function sendDailySummaryEmail(dateStr) {
   const payload = JSON.stringify({
     action: 'sendDailySummary',
     adminEmail,
+    recipients: emailList,
     date: dateStr,
     summary
   });
@@ -502,14 +559,15 @@ function startDailyEmailScheduler() {
     try {
       const config = getConfig();
       const de = config.dailyEmail || {};
-      if (!de.enabled || !de.adminEmail || !config.googleScriptUrl) return;
+      const emailList = getConfiguredEmailList(de);
+      if (!de.enabled || emailList.length === 0 || !config.googleScriptUrl) return;
 
       const { dateStr, timeStr } = getSydneyDateAndTime();
       const targetTime = /^\d{2}:\d{2}$/.test(de.time || '') ? de.time : '15:00';
 
       if (de.lastSentDate === dateStr) return;
       if (timeStr >= targetTime) {
-        console.log(`[Scheduler] Sending daily dispatch summary for ${dateStr} to ${de.adminEmail}...`);
+        console.log(`[Scheduler] Sending daily dispatch summary for ${dateStr} to ${emailList.join(', ')}...`);
         await sendDailySummaryEmail(dateStr);
         console.log(`[Scheduler] Daily summary sent successfully.`);
       }
@@ -1827,18 +1885,25 @@ async function handleRequest(req, res) {
         googleSheetUrl: typeof body.googleSheetUrl === 'string' ? body.googleSheetUrl.trim() : current.googleSheetUrl,
         ocrMode: body.ocrMode || current.ocrMode,
         geminiModel: body.geminiModel || current.geminiModel || 'auto',
-        dailyEmail: {
-          ...current.dailyEmail,
-          ...(body.dailyEmail && typeof body.dailyEmail === 'object' ? {
-            enabled: Boolean(body.dailyEmail.enabled),
-            adminEmail: typeof body.dailyEmail.adminEmail === 'string'
-              ? body.dailyEmail.adminEmail.trim()
-              : current.dailyEmail.adminEmail,
-            time: /^\d{2}:\d{2}$/.test(body.dailyEmail.time || '')
-              ? body.dailyEmail.time
-              : current.dailyEmail.time || '15:00'
-          } : {})
-        },
+        dailyEmail: (() => {
+          const base = { ...current.dailyEmail };
+          if (body.dailyEmail && typeof body.dailyEmail === 'object') {
+            base.enabled = Boolean(body.dailyEmail.enabled);
+            if (Array.isArray(body.dailyEmail.recipients)) {
+              base.recipients = normalizeEmailRecipients(body.dailyEmail.recipients);
+              base.adminEmail = getConfiguredEmailList({ recipients: base.recipients }).join(', ');
+            } else if (typeof body.dailyEmail.adminEmail === 'string') {
+              base.adminEmail = body.dailyEmail.adminEmail.trim();
+              base.recipients = normalizeEmailRecipients(null, base.adminEmail);
+            }
+            if (/^\d{2}:\d{2}$/.test(body.dailyEmail.time || '')) {
+              base.time = body.dailyEmail.time;
+            } else {
+              base.time = current.dailyEmail.time || '15:00';
+            }
+          }
+          return base;
+        })(),
         localCleanup: {
           ...DEFAULT_CONFIG.localCleanup,
           ...current.localCleanup,
@@ -2798,16 +2863,46 @@ function findGitBinary() {
 
       const totalQty = products.reduce((sum, p) => sum + p.quantity, 0);
 
-      const localTrackingSlipUrl = body.trackingSlipImage
-        ? saveImageLocally(dispatchId, body.trackingSlipImage, 'tracking-slip.jpg')
-        : null;
+      let localTrackingSlipUrl = null;
+      let preUploadedTrackingSlip = null;
+      let gsFallbackTrackingSlip = null;
+
+      const folder = path.join(UPLOADS_DIR, dispatchId);
+      if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
+
+      if (body.trackingSlipDraft && body.trackingSlipDraft.draftId) {
+        const safeSlipDraftId = String(body.trackingSlipDraft.draftId).replace(/[^a-zA-Z0-9_-]/g, '_');
+        const slipDraftPath = path.join(DRAFTS_DIR, `${safeSlipDraftId}.jpg`);
+        const slipDestPath = path.join(folder, 'tracking-slip.jpg');
+        if (fs.existsSync(slipDraftPath)) {
+          if (!body.trackingSlipDraft.driveFileId) {
+            try {
+              const buf = fs.readFileSync(slipDraftPath);
+              gsFallbackTrackingSlip = `data:image/jpeg;base64,${buf.toString('base64')}`;
+            } catch (e) {}
+          }
+          try {
+            fs.renameSync(slipDraftPath, slipDestPath);
+          } catch (e) {
+            fs.copyFileSync(slipDraftPath, slipDestPath);
+            try { fs.unlinkSync(slipDraftPath); } catch (e2) {}
+          }
+          localTrackingSlipUrl = `/uploads/${dispatchId}/tracking-slip.jpg`;
+        }
+        if (body.trackingSlipDraft.driveFileId) {
+          preUploadedTrackingSlip = {
+            fileId: body.trackingSlipDraft.driveFileId,
+            url: body.trackingSlipDraft.driveUrl || ''
+          };
+        }
+      } else if (body.trackingSlipImage) {
+        localTrackingSlipUrl = saveImageLocally(dispatchId, body.trackingSlipImage, 'tracking-slip.jpg');
+        gsFallbackTrackingSlip = body.trackingSlipImage;
+      }
 
       const localPackagingUrls = [];
       const preUploadedPackaging = [];
       const gsFallbackPackagingImages = [];
-
-      const folder = path.join(UPLOADS_DIR, dispatchId);
-      if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
 
       if (Array.isArray(body.packagingDrafts)) {
         body.packagingDrafts.forEach((draft) => {
@@ -2872,7 +2967,7 @@ function findGitBinary() {
         totalQty,
         localTrackingSlipUrl,
         localPackagingUrls,
-        syncStatus: 'local_only',
+        syncStatus: config.googleScriptUrl ? 'syncing' : 'local_only',
         syncError: null,
         driveFolderUrl: '',
         trackingSlipDriveUrl: '',
@@ -2880,54 +2975,71 @@ function findGitBinary() {
         sheetRowNumber: null
       };
 
-      if (config.googleScriptUrl) {
-        try {
-          const gsPayload = JSON.stringify({
-            action: 'createDispatch',
-            dispatchId: record.dispatchId,
-            orderNumber: record.orderNumber,
-            orderDate: record.orderDate,
-            trackingNumber: record.trackingNumber,
-            carrier: record.carrier,
-            customerName: record.customerName,
-            staffName: record.staffName,
-            products: record.products,
-            trackingSlipImage: body.trackingSlipImage || null,
-            preUploadedPackaging,
-            packagingImages: gsFallbackPackagingImages
-          });
-
-          const gsRes = await fetchWithRedirects(config.googleScriptUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(gsPayload)
-            },
-            body: gsPayload,
-            timeout: 45000
-          });
-
-          if (gsRes.json && gsRes.json.success) {
-            record.syncStatus = 'synced';
-            record.driveFolderUrl = gsRes.json.driveFolderUrl || '';
-            record.trackingSlipDriveUrl = gsRes.json.trackingSlipUrl || '';
-            record.packagingDriveUrls = gsRes.json.packagingImageUrls || [];
-            record.sheetRowNumber = gsRes.json.rowNumber || null;
-          } else {
-            record.syncStatus = 'pending_sync';
-            record.syncError = gsRes.json?.error || `Google Script returned status ${gsRes.statusCode}`;
-          }
-        } catch (err) {
-          record.syncStatus = 'pending_sync';
-          record.syncError = err.message;
-        }
-      }
-
       dispatches.unshift(record);
       writeJsonFile(DISPATCHES_FILE, dispatches);
 
+      const syncingInBackground = Boolean(config.googleScriptUrl);
+      if (syncingInBackground) {
+        const gsPayload = JSON.stringify({
+          action: 'createDispatch',
+          dispatchId: record.dispatchId,
+          orderNumber: record.orderNumber,
+          orderDate: record.orderDate,
+          trackingNumber: record.trackingNumber,
+          carrier: record.carrier,
+          customerName: record.customerName,
+          staffName: record.staffName,
+          products: record.products,
+          preUploadedTrackingSlip,
+          trackingSlipImage: gsFallbackTrackingSlip || null,
+          preUploadedPackaging,
+          packagingImages: gsFallbackPackagingImages
+        });
+
+        // Run Google Sheets & Drive sync asynchronously so Save Dispatch responds immediately
+        setImmediate(async () => {
+          try {
+            const gsRes = await fetchWithRedirects(config.googleScriptUrl, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': Buffer.byteLength(gsPayload)
+              },
+              body: gsPayload,
+              timeout: 45000
+            });
+
+            const latest = readJsonFile(DISPATCHES_FILE, []);
+            const target = latest.find((d) => d.dispatchId === record.dispatchId);
+            if (!target) return;
+
+            if (gsRes.json && gsRes.json.success) {
+              target.syncStatus = 'synced';
+              target.syncError = null;
+              target.driveFolderUrl = gsRes.json.driveFolderUrl || '';
+              target.trackingSlipDriveUrl = gsRes.json.trackingSlipUrl || '';
+              target.packagingDriveUrls = gsRes.json.packagingImageUrls || [];
+              target.sheetRowNumber = gsRes.json.rowNumber || null;
+            } else {
+              target.syncStatus = 'pending_sync';
+              target.syncError = gsRes.json?.error || `Google Script returned status ${gsRes.statusCode}`;
+            }
+            writeJsonFile(DISPATCHES_FILE, latest);
+          } catch (err) {
+            const latest = readJsonFile(DISPATCHES_FILE, []);
+            const target = latest.find((d) => d.dispatchId === record.dispatchId);
+            if (target) {
+              target.syncStatus = 'pending_sync';
+              target.syncError = err.message;
+              writeJsonFile(DISPATCHES_FILE, latest);
+            }
+          }
+        });
+      }
+
       return sendJson(res, 200, {
         success: true,
+        syncingInBackground,
         dispatch: record
       });
     }
