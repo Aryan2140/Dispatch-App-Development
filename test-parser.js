@@ -265,4 +265,25 @@ const res12g = parser.parseTrackingSlipText(directAllied, 90);
 assert.strictEqual(res12g.customerName, 'Ethan Davis');
 assert.strictEqual(res12g.trackingNumber, 'DFE998877665');
 
+// Test 13: Australia Post MyPost Business (vertical AP Article Id: 997..., PO Box 5001 Greystanes sender)
+const myPostText = `
+Parcel Post MyPost Business
+To:
+Zaza Horstmans
+Zaza Horstmans
+123 Taylors Rd
+NASHUA NSW 2479
+Packaging Small Satchel Up to 5kg
+Ref: 14557 Aimex Website
+Sender: 63512384
+Aimex Australia Pty Ltd
+Po Box 5001
+GREYSTANES NSW 2145
+AP Article Id: 99724133483201008320904 1123
+`;
+const res13 = parser.parseTrackingSlipText(myPostText, 90);
+console.log('Test 13 (MyPost Business):', res13);
+assert.strictEqual(res13.customerName, 'Zaza Horstmans');
+assert.strictEqual(res13.trackingNumber, '99724133483201008320904');
+
 console.log('\nAll parser tests passed!');

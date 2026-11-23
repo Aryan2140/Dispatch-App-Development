@@ -23,6 +23,8 @@ function Await($WinRtTask, $ResultType) {
 [Windows.Graphics.Imaging.BitmapAlphaMode,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
 [Windows.Graphics.Imaging.BitmapTransform,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
 [Windows.Graphics.Imaging.BitmapInterpolationMode,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapRotation,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
+[Windows.Graphics.Imaging.BitmapBounds,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
 [Windows.Graphics.Imaging.ExifOrientationMode,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
 [Windows.Graphics.Imaging.ColorManagementMode,Windows.Graphics.Imaging,ContentType=WindowsRuntime] | Out-Null
 [Windows.Media.Ocr.OcrEngine,Windows.Media.Ocr,ContentType=WindowsRuntime] | Out-Null
@@ -164,6 +166,7 @@ while ($true) {
         }
       }
 
+      $emittedText = ""
       if ($lineItems.Count -gt 0) {
         $sorted = $lineItems | Sort-Object @{Expression = 'MidY'; Ascending = $true}, @{Expression = 'MinX'; Ascending = $true}
         $rows = @()
@@ -215,6 +218,7 @@ while ($true) {
           $rows += ,@($currentRow)
         }
 
+        $rowTexts = @()
         foreach ($row in $rows) {
           $orderedRow = @($row | Sort-Object -Property MinX)
           $sb = New-Object System.Text.StringBuilder
@@ -232,7 +236,41 @@ while ($true) {
             }
             [void]$sb.Append($orderedRow[$k].Text)
           }
-          [Console]::Out.WriteLine($sb.ToString())
+          $rowStr = $sb.ToString()
+          $rowTexts += $rowStr
+          [Console]::Out.WriteLine($rowStr)
+        }
+        $emittedText = $rowTexts -join "`n"
+      }
+
+      # Fallback pass for sideways/vertical barcodes (e.g. MyPost Business right-hand AP Article Id)
+      if ($emittedText -notmatch '(?i)(?:Article\s*Id|Connote|Consignment|CP[A-Z]{5}\d{6}|[0-9]{2}[A-Z]{3}[0-9]{7}|997\d{15})') {
+        $rotBitmap = $null
+        try {
+          $rotTransform = New-Object Windows.Graphics.Imaging.BitmapTransform
+          $rotTransform.Rotation = [Windows.Graphics.Imaging.BitmapRotation]::Clockwise270Degrees
+          $rotTransform.InterpolationMode = [Windows.Graphics.Imaging.BitmapInterpolationMode]::Cubic
+          $sW = if ($transform.ScaledWidth -gt 0) { [uint32]$transform.ScaledWidth } else { [uint32]$decoder.PixelWidth }
+          $sH = if ($transform.ScaledHeight -gt 0) { [uint32]$transform.ScaledHeight } else { [uint32]$decoder.PixelHeight }
+          if ($sW -gt 0 -and $sH -gt 0) {
+            $rotTransform.ScaledWidth = $sW
+            $rotTransform.ScaledHeight = $sH
+            $rotBitmap = Await ($decoder.GetSoftwareBitmapAsync(
+              [Windows.Graphics.Imaging.BitmapPixelFormat]::Bgra8,
+              [Windows.Graphics.Imaging.BitmapAlphaMode]::Premultiplied,
+              $rotTransform,
+              [Windows.Graphics.Imaging.ExifOrientationMode]::RespectExifOrientation,
+              [Windows.Graphics.Imaging.ColorManagementMode]::DoNotColorManage
+            )) ([Windows.Graphics.Imaging.SoftwareBitmap])
+            $rotResult = Await ($engine.RecognizeAsync($rotBitmap)) ([Windows.Media.Ocr.OcrResult])
+            foreach ($rLine in $rotResult.Lines) {
+              if ($rLine.Text) {
+                [Console]::Out.WriteLine($rLine.Text)
+              }
+            }
+          }
+        } catch {} finally {
+          if ($null -ne $rotBitmap) { try { $rotBitmap.Dispose() } catch {} }
         }
       }
     } finally {

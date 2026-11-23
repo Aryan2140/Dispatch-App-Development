@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <title>Aimex Dispatch</title>
-  <link rel="icon" type="image/png" href="/assets/aimex-icon-gold.png" />
-  <link rel="apple-touch-icon" href="/assets/aimex-icon-gold.png" />
+  <link rel="icon" type="image/png" href="/assets/aimex-favicon.png" />
+  <link rel="apple-touch-icon" href="/assets/aimex-favicon.png" />
   <link rel="stylesheet" href="/styles.css" />
   <script src="https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js" defer></script>
   <script src="/app.js" defer></script>
@@ -128,7 +128,7 @@
             aria-selected="false"
             data-tab="historyTab"
           >
-            History <span id="historyCountBadge" class="seg-count">0</span>
+            History
           </button>
           <button
             type="button"
@@ -138,7 +138,7 @@
             aria-selected="false"
             data-tab="productsTab"
           >
-            Products <span id="productsCountBadge" class="seg-count">0</span>
+            Products
           </button>
         </div>
       </div>
@@ -158,6 +158,11 @@
       >
 
         <div id="dispatchAlertBanner" class="alert-banner hidden" role="status" aria-live="polite"></div>
+
+        <div id="editingModeBanner" class="editing-banner hidden" role="status" aria-live="polite">
+          <span id="editingModeText">Editing saved dispatch</span>
+          <button type="button" id="cancelEditDispatchBtn" class="btn btn-xs btn-outline">Cancel Edit</button>
+        </div>
 
         <form id="dispatchForm" class="stack" aria-label="New dispatch entry" novalidate>
 
@@ -208,7 +213,7 @@
             </div>
 
             <div id="trackingSlipEmptyState" class="empty-box">
-              Tap <strong>Take Photo</strong> or <strong>Upload</strong> to scan a tracking label.
+              No Tracking slip uploaded yet
             </div>
           </div>
 
@@ -220,7 +225,6 @@
                   <span class="step-badge" aria-hidden="true">2</span>
                   <h2 class="card-title">Order Details</h2>
                 </div>
-                <p class="form-req-note">Fields marked <span aria-hidden="true">*</span> are required.</p>
               </div>
             </div>
 
@@ -234,7 +238,7 @@
                   id="orderNumberInput"
                   name="order_number"
                   class="mono"
-                  placeholder="Manual entry, e.g. 14282"
+                  placeholder="e.g. 14282"
                   autocomplete="off"
                   autocorrect="off"
                   autocapitalize="none"
@@ -345,9 +349,15 @@
               <div id="quickAccessGrid" class="quick-access-grid"></div>
             </div>
 
-            <hr class="hairline" />
-
-            <div id="productRowsContainer" class="product-rows"></div>
+            <div class="added-products-section">
+              <div class="added-products-header">
+                <span class="added-products-label">Added Products</span>
+              </div>
+              <div id="productRowsContainer" class="product-rows"></div>
+              <button type="button" id="addProductRowBtn" class="btn btn-outline btn-sm add-product-btn">
+                + Add Another Product
+              </button>
+            </div>
           </div>
 
           <!-- 4. PACKAGING PICTURES -->
@@ -358,7 +368,6 @@
                   <span class="step-badge" aria-hidden="true">4</span>
                   <h2 class="card-title">Packaging Pictures</h2>
                 </div>
-                <p class="card-sub">Capture photos of packed items and parcel</p>
               </div>
               <span id="packagingCountBadge" class="meta-pill">0 photos</span>
             </div>
@@ -401,7 +410,7 @@
           <!-- SUBMIT BAR -->
           <div class="submit-bar">
             <button type="button" id="resetFormBtn" class="btn btn-outline btn-lg">Clear</button>
-            <button type="submit" id="submitDispatchBtn" class="btn btn-accent-gold btn-lg flex-1">
+            <button type="button" id="submitDispatchBtn" class="btn btn-accent-gold btn-lg flex-1">
               Save Dispatch
             </button>
           </div>
@@ -580,7 +589,7 @@
 
       <!-- Admin Password Gate -->
       <div id="adminLoginGate" class="modal-body stack">
-        <p class="card-sub">Enter the administrator password to configure Google Sheets, Daily Summary Emails, and OCR settings.</p>
+        <p class="card-sub">Enter the Administrator Password.</p>
         <form id="adminLoginForm" class="stack" novalidate>
           <div class="field-group">
             <label for="adminPasswordInput">Admin Password <span class="req" aria-hidden="true">*</span></label>
@@ -746,7 +755,7 @@
         </button>
       </div>
       <div class="modal-body center-col">
-        <p class="card-sub">Scan on a phone or iPad connected to the same Wi-Fi network.</p>
+        <p class="card-sub">Scan on a device connected to the same Wi-Fi network.</p>
         <div id="wifiQrContainer" class="qr-box"></div>
         <div id="wifiUrlsList" class="wifi-urls"></div>
       </div>
@@ -790,6 +799,27 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-outline btn-sm" data-close-modal="confirmDeleteModal" autofocus>Cancel</button>
         <button type="button" id="confirmDeleteBtn" class="btn btn-danger btn-sm">Confirm Delete</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- CONFIRM CLEAR FORM MODAL (Native <dialog>)                           -->
+  <!-- ==================================================================== -->
+  <dialog id="confirmClearModal" class="native-modal" aria-labelledby="confirmClearTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="confirmClearTitle">Clear Dispatch Form?</h2>
+        <button type="button" class="modal-close" data-close-modal="confirmClearModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body stack">
+        <p id="confirmClearMsg" class="card-sub">This will clear all entered details, products, and attached photos on the current form.</p>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline btn-sm" data-close-modal="confirmClearModal" autofocus>Cancel</button>
+        <button type="button" id="confirmClearBtn" class="btn btn-danger btn-sm">Clear Form</button>
       </div>
     </div>
   </dialog>

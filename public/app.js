@@ -38,8 +38,11 @@
     editingQuickSlots: false,
     activeQuickSlotIndex: 0,
     dispatches: [],
+    editingDispatchId: null,
     trackingSlipBase64: null,
-    packagingImagesBase64: []
+    trackingSlipReplaced: false,
+    trackingSlipRemoved: false,
+    packagingItems: []
   };
 
   const els = {};
@@ -57,8 +60,9 @@
       'openGoogleSheetLink',
       'wifiAccessBtn',
       'settingsBtn',
-      'historyCountBadge',
-      'productsCountBadge',
+      'editingModeBanner',
+      'editingModeText',
+      'cancelEditDispatchBtn',
       'dispatchAlertBanner',
       'dispatchForm',
       'trackingSlipCameraInput',
@@ -87,6 +91,7 @@
       'toggleEditQuickBtn',
       'editSlotsLabel',
       'productRowsContainer',
+      'addProductRowBtn',
       'syncProductsFromSheetBtn',
       'packagingCountBadge',
       'packagingCameraInput',
@@ -103,6 +108,8 @@
       'confirmDeleteModal',
       'confirmDeleteMsg',
       'confirmDeleteBtn',
+      'confirmClearModal',
+      'confirmClearBtn',
       'addProductForm',
       'newProdSku',
       'newProdCategory',
@@ -206,7 +213,6 @@
   let resetFormValidation = () => {};
 
   function setupAccessibleValidation() {
-    const supportsUserInvalid = typeof CSS !== 'undefined' && CSS.supports && CSS.supports('selector(:user-invalid)');
     const announcer = document.createElement('div');
     announcer.setAttribute('aria-live', 'polite');
     announcer.classList.add('visually-hidden');
@@ -214,9 +220,6 @@
 
     let announceTimer;
     let announcedField;
-    const dirtyState = new WeakMap();
-    const flagged = new WeakSet();
-    const announced = new WeakSet();
 
     const linkError = (el, shown) => {
       const errorId = el.dataset.error;
@@ -245,34 +248,23 @@
       announcedField = el;
       announceTimer = setTimeout(() => {
         announcer.textContent = label + spokenText(error);
-      }, 500);
+      }, 300);
     };
 
     syncAriaField = (el, announce = false) => {
       if (!el?.matches?.('input, select, textarea') || !el.dataset.error) return;
-      let isInvalid = false;
-      if (supportsUserInvalid) {
-        isInvalid = el.matches(':user-invalid');
-      } else {
-        const st = dirtyState.get(el);
-        isInvalid = Boolean(st && st.hasBlurred && !el.validity.valid);
-        el.classList.toggle('user-invalid-fallback', isInvalid);
-      }
+      const form = el.form;
+      const wasSubmitted = Boolean(form && form.classList.contains('was-submitted'));
+      const isInvalid = wasSubmitted && !el.validity.valid;
 
+      el.classList.toggle('field-invalid', isInvalid);
       if (isInvalid) {
-        if (announce && !announced.has(el)) {
-          announceError(el);
-          announced.add(el);
-        }
+        if (announce) announceError(el);
         el.setAttribute('aria-invalid', 'true');
         linkError(el, true);
-        flagged.add(el);
-      } else if (flagged.has(el) || el.getAttribute('aria-invalid') !== 'true') {
+      } else {
         el.setAttribute('aria-invalid', 'false');
         linkError(el, false);
-        el.classList.remove('user-invalid-fallback');
-        flagged.delete(el);
-        announced.delete(el);
         if (announcedField === el) {
           clearTimeout(announceTimer);
           announcer.textContent = '';
@@ -282,10 +274,9 @@
 
     resetFormValidation = (form) => {
       if (!form) return;
+      form.classList.remove('was-submitted');
       for (const control of form.elements || []) {
-        dirtyState.delete(control);
-        flagged.delete(control);
-        announced.delete(control);
+        control.classList.remove('field-invalid');
         control.classList.remove('user-invalid-fallback');
         if (control.dataset?.error) {
           control.setAttribute('aria-invalid', 'false');
@@ -300,56 +291,31 @@
       el.setAttribute('aria-invalid', 'false');
     });
 
-    document.addEventListener(
-      'blur',
-      (e) => {
-        const el = e.target;
-        if (!el?.dataset?.error) return;
-        const st = dirtyState.get(el) || { hasInteracted: false, hasBlurred: false };
-        st.hasBlurred = true;
-        dirtyState.set(el, st);
-        syncAriaField(el, true);
-      },
-      true
-    );
-
     document.addEventListener('input', (e) => {
       const el = e.target;
       if (!el?.dataset?.error) return;
-      const st = dirtyState.get(el) || { hasInteracted: false, hasBlurred: false };
-      st.hasInteracted = true;
-      dirtyState.set(el, st);
-      if (el.getAttribute('aria-invalid') === 'true' || el.classList.contains('user-invalid-fallback')) {
+      if (el.classList.contains('field-invalid') || el.getAttribute('aria-invalid') === 'true') {
         syncAriaField(el, false);
       }
     });
-
-    document.addEventListener(
-      'invalid',
-      (e) => {
-        const el = e.target;
-        if (!el?.dataset?.error) return;
-        dirtyState.set(el, { hasInteracted: true, hasBlurred: true });
-        announced.add(el);
-        el.classList.add('user-invalid-fallback');
-        el.setAttribute('aria-invalid', 'true');
-        linkError(el, true);
-        flagged.add(el);
-      },
-      true
-    );
   }
 
   function validateFormAndFocus(form) {
     if (!form) return true;
+    form.classList.add('was-submitted');
     const controls = Array.from(form.elements || []).filter((el) => typeof el.checkValidity === 'function');
     let firstInvalid = null;
     for (const el of controls) {
-      if (!el.checkValidity()) {
-        if (!firstInvalid) firstInvalid = el;
+      const valid = el.checkValidity();
+      if (el.dataset?.error) {
+        syncAriaField(el, false);
+      } else {
+        el.classList.toggle('field-invalid', !valid);
       }
+      if (!valid && !firstInvalid) firstInvalid = el;
     }
     if (firstInvalid) {
+      if (firstInvalid.dataset?.error) syncAriaField(firstInvalid, true);
       firstInvalid.focus();
       return false;
     }
@@ -565,9 +531,25 @@
     els.packagingCameraInput.addEventListener('change', handlePackagingFilesChange);
     els.packagingFileInput.addEventListener('change', handlePackagingFilesChange);
 
-    // Form Submit & Clear
-    els.dispatchForm.addEventListener('submit', handleSubmitDispatch);
-    els.resetFormBtn.addEventListener('click', () => resetDispatchForm(true));
+    // Add Another Product button + Prevent accidental Enter submission on dispatch form
+    els.addProductRowBtn?.addEventListener('click', () => {
+      const newRow = addProductRow();
+      newRow?.querySelector('.product-name-input')?.focus();
+    });
+    els.dispatchForm.addEventListener('submit', (e) => e.preventDefault());
+    els.submitDispatchBtn.addEventListener('click', handleSubmitDispatch);
+    els.resetFormBtn.addEventListener('click', () => {
+      if (els.confirmClearModal) {
+        openModalDialog(els.confirmClearModal);
+      } else {
+        resetDispatchForm(true);
+      }
+    });
+    els.confirmClearBtn?.addEventListener('click', () => {
+      closeModalDialog(els.confirmClearModal);
+      resetDispatchForm(true);
+    });
+    els.cancelEditDispatchBtn?.addEventListener('click', () => resetDispatchForm(true));
 
     // Search History & Sync
     els.historySearchInput.addEventListener('input', debounce(() => loadDispatches(false), 180));
@@ -817,6 +799,55 @@
     });
   }
 
+  /**
+   * Crops the right-hand vertical barcode strip and rotates it 90 degrees CCW so
+   * top-to-bottom text (e.g. MyPost Business "AP Article Id: 997...") is horizontal upright.
+   */
+  function createVerticalBarcodeStripForOcr(dataUrl) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const sx = Math.floor(img.width * 0.54);
+          const sw = Math.max(1, img.width - sx);
+          const sh = img.height;
+
+          // After 90deg CCW rotation, width = sh, height = sw
+          const targetMax = 1800;
+          const scale = sh > 0 && sh < targetMax ? Math.min(2.2, targetMax / sh) : 1;
+          const outW = Math.round(sh * scale);
+          const outH = Math.round(sw * scale);
+
+          const canvas = document.createElement('canvas');
+          canvas.width = outW;
+          canvas.height = outH;
+          const ctx = canvas.getContext('2d', { willReadFrequently: true });
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = 'high';
+          ctx.translate(0, outH);
+          ctx.rotate(-Math.PI / 2);
+          ctx.drawImage(img, sx, 0, sw, sh, 0, 0, outH, outW);
+
+          // Light contrast boost so small rotated text is sharp
+          const imgData = ctx.getImageData(0, 0, outW, outH);
+          const d = imgData.data;
+          for (let i = 0; i < d.length; i += 4) {
+            const lum = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
+            let v = (lum - 128) * 1.35 + 135;
+            v = v < 0 ? 0 : v > 255 ? 255 : v;
+            d[i] = d[i + 1] = d[i + 2] = v;
+          }
+          ctx.putImageData(imgData, 0, 0);
+          resolve(canvas.toDataURL('image/jpeg', 0.92));
+        } catch (err) {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
   // ==========================================================================
   // HOST-SIDE OCR + CERTAINTY % METER
   // ==========================================================================
@@ -830,7 +861,7 @@
         SLIP_IMAGE_SPEC.maxDim,
         SLIP_IMAGE_SPEC.quality
       );
-      setTrackingSlipImage(standardizedSlip);
+      setTrackingSlipImage(standardizedSlip, true);
       await runHostOcr(standardizedSlip);
     } catch (err) {
       showBanner('error', 'Failed to load tracking slip: ' + err.message);
@@ -846,15 +877,19 @@
         SLIP_IMAGE_SPEC.maxDim,
         SLIP_IMAGE_SPEC.quality
       );
-      setTrackingSlipImage(standardizedSlip);
+      setTrackingSlipImage(standardizedSlip, true);
       await runHostOcr(standardizedSlip);
     } catch (err) {
       showBanner('error', 'Failed to load sample slip: ' + err.message);
     }
   }
 
-  function setTrackingSlipImage(dataUrl) {
+  function setTrackingSlipImage(dataUrl, isNewUpload = false) {
     state.trackingSlipBase64 = dataUrl;
+    if (isNewUpload) {
+      state.trackingSlipReplaced = true;
+      state.trackingSlipRemoved = false;
+    }
     els.trackingSlipPreviewImg.src = dataUrl;
     els.trackingSlipPreviewContainer.classList.remove('hidden');
     els.trackingSlipEmptyState.classList.add('hidden');
@@ -864,6 +899,13 @@
 
   function clearTrackingSlip() {
     state.trackingSlipBase64 = null;
+    if (state.editingDispatchId) {
+      state.trackingSlipRemoved = true;
+      state.trackingSlipReplaced = false;
+    } else {
+      state.trackingSlipRemoved = false;
+      state.trackingSlipReplaced = false;
+    }
     els.trackingSlipPreviewImg.src = '';
     els.trackingSlipPreviewContainer.classList.add('hidden');
     els.trackingSlipEmptyState.classList.remove('hidden');
@@ -875,9 +917,16 @@
   }
 
   async function runHostOcr(standardizedSlipDataUrl) {
+    const willUseGemini =
+      Boolean(state.config.hasGeminiApiKey) &&
+      (state.config.ocrMode === 'gemini' || state.config.ocrMode === 'auto') &&
+      state.config.geminiStatus?.state !== 'fallback_quota';
+
     els.ocrProgressBox.classList.remove('hidden');
     els.ocrLowCertaintyNotice.classList.add('hidden');
-    els.ocrStatusText.textContent = 'Reading label on host...';
+    els.ocrStatusText.textContent = willUseGemini
+      ? 'Reading label using Gemini...'
+      : 'Reading label on host...';
     els.ocrPercentText.textContent = '';
     els.ocrProgressBar.className = 'ocr-progress';
     els.ocrProgressBar.removeAttribute('value');
@@ -903,7 +952,38 @@
         updateOcrEngineBadge();
       }
 
-      // Pass 2: If a field is missing or uncertain (< 78%), retry with shadow normalization
+      // Pass 1b: Vertical right-strip barcode rescue (e.g. MyPost Business vertical 997... Article Id)
+      if (!extracted.trackingNumber || (Number(extracted.trackingNumberCertainty) || 0) < 75) {
+        els.ocrStatusText.textContent = engineUsed.startsWith('gemini')
+          ? 'Checking vertical barcode with Gemini...'
+          : 'Checking vertical barcode on host...';
+        const stripDataUrl = await createVerticalBarcodeStripForOcr(standardizedSlipDataUrl);
+        const stripRes = await fetch('/api/ocr', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            imageBase64: stripDataUrl,
+            skipGemini: !engineUsed.startsWith('gemini')
+          })
+        }).then((r) => r.json());
+
+        if (stripRes.geminiStatus) {
+          state.config.geminiStatus = stripRes.geminiStatus;
+          updateOcrEngineBadge();
+        }
+        if (stripRes.success && stripRes.extracted && stripRes.extracted.trackingNumber) {
+          const sEx = stripRes.extracted;
+          if ((Number(sEx.trackingNumberCertainty) || 0) >= (Number(extracted.trackingNumberCertainty) || 0)) {
+            extracted = {
+              ...extracted,
+              trackingNumber: sEx.trackingNumber,
+              trackingNumberCertainty: Math.max(85, Number(sEx.trackingNumberCertainty) || 85)
+            };
+          }
+        }
+      }
+
+      // Pass 2: If a field is still missing or uncertain (< 78%), retry with shadow normalization
       // Never burn another Gemini API call on Pass 2 if Pass 1 already tried Gemini
       const needsShadowRetry =
         !extracted.customerName ||
@@ -1211,14 +1291,14 @@
 
   function updateOrderNumberReminder() {
     if (!els.orderCheckReminderNotice || !els.orderNumberInput) return;
-    const hasPackagingPhotos = state.packagingImagesBase64.length > 0;
+    const hasPackagingPhotos = state.packagingItems.length > 0;
     const hasOrderNumber = els.orderNumberInput.value.trim().length > 0;
     els.orderCheckReminderNotice.classList.toggle('hidden', !(hasPackagingPhotos && !hasOrderNumber));
   }
 
   function updateLocationReminder() {
     if (!els.locationReminderNotice || !els.productRowsContainer) return;
-    const hasPictures = state.packagingImagesBase64.length > 0;
+    const hasPictures = state.packagingItems.length > 0;
     if (!hasPictures) {
       els.locationReminderNotice.classList.add('hidden');
       return;
@@ -1266,7 +1346,7 @@
           aria-label="Location product was taken from"
           value="${escapeHtml(initial.location || '')}"
           autocomplete="off"
-          enterkeyhint="done"
+          enterkeyhint="next"
         />
       </div>
       <div class="qty-stepper">
@@ -1360,14 +1440,22 @@
     });
 
     input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.isComposing && input.value.trim()) {
+      if (e.key === 'Enter' && !e.isComposing) {
         e.preventDefault();
         dropdown.classList.add('hidden');
-        locationInput.focus();
+        const nextRow = addProductRow();
+        nextRow?.querySelector('.product-name-input')?.focus();
       }
     });
 
     locationInput.addEventListener('input', updateLocationReminder);
+    locationInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.isComposing) {
+        e.preventDefault();
+        const nextRow = addProductRow();
+        nextRow?.querySelector('.product-name-input')?.focus();
+      }
+    });
 
     minusBtn.addEventListener('click', () => {
       qtyInput.value = Math.max(1, (parseInt(qtyInput.value, 10) || 1) - 1);
@@ -1446,8 +1534,50 @@
   }
 
   // ==========================================================================
-  // PACKAGING PHOTOS (STANDARDIZED 960px @ 0.68)
+  // PACKAGING PHOTOS (BACKGROUND DRAFT UPLOAD TO HOST + DRIVE)
   // ==========================================================================
+
+  function uploadDraftPackagingPhoto(item) {
+    const draftId = item.draftId || `draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    item.draftId = draftId;
+    item.status = 'uploading';
+
+    const p = fetch('/api/draft-photos', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ draftId, imageBase64: item.dataUrl })
+    })
+      .then((r) => r.json())
+      .then((res) => {
+        if (res && res.success) {
+          item.driveFileId = res.driveFileId || '';
+          item.driveUrl = res.driveUrl || '';
+          item.status = 'ready';
+        } else {
+          item.status = 'local';
+        }
+      })
+      .catch(() => {
+        item.status = 'local';
+      })
+      .finally(() => {
+        const badge = els.packagingGallery?.querySelector(`[data-draft-status="${item.id}"]`);
+        if (badge) {
+          badge.textContent = item.status === 'ready' ? (item.driveFileId ? 'Uploaded' : 'Staged') : '';
+          badge.classList.toggle('ready', item.status === 'ready');
+          if (!badge.textContent) badge.classList.add('hidden');
+        }
+      });
+
+    item.uploadPromise = p;
+    return p;
+  }
+
+  function discardDraftPackagingPhoto(item) {
+    if (!item || !item.draftId) return;
+    const qs = item.driveFileId ? `?driveFileId=${encodeURIComponent(item.driveFileId)}` : '';
+    fetch(`/api/draft-photos/${encodeURIComponent(item.draftId)}${qs}`, { method: 'DELETE' }).catch(() => {});
+  }
 
   async function handlePackagingFilesChange(e) {
     const files = Array.from(e.target.files || []);
@@ -1460,17 +1590,30 @@
           PACKAGING_IMAGE_SPEC.maxDim,
           PACKAGING_IMAGE_SPEC.quality
         );
-        state.packagingImagesBase64.push(compressed);
+        const item = {
+          id: `pkg-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          previewUrl: compressed,
+          dataUrl: compressed,
+          existingLocalUrl: null,
+          draftId: `draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          driveFileId: '',
+          driveUrl: '',
+          status: 'uploading',
+          uploadPromise: null
+        };
+        state.packagingItems.push(item);
+        renderPackagingGallery();
+        // Start background draft upload without blocking UI interaction
+        uploadDraftPackagingPhoto(item);
       } catch (err) {
         console.error('Packaging image error:', err);
       }
     }
-    renderPackagingGallery();
     e.target.value = '';
   }
 
   function renderPackagingGallery() {
-    const count = state.packagingImagesBase64.length;
+    const count = state.packagingItems.length;
     els.packagingCountBadge.textContent = `${count} photo${count === 1 ? '' : 's'}`;
 
     if (count === 0) {
@@ -1487,21 +1630,29 @@
     updateLocationReminder();
     updateOrderNumberReminder();
 
-    els.packagingGallery.innerHTML = state.packagingImagesBase64
-      .map(
-        (src, idx) => `
+    els.packagingGallery.innerHTML = state.packagingItems
+      .map((item, idx) => {
+        const src = item.previewUrl || item.existingLocalUrl || '';
+        let statusLabel = '';
+        if (item.status === 'uploading') statusLabel = 'Uploading...';
+        else if (item.status === 'ready') statusLabel = item.driveFileId ? 'Uploaded' : 'Staged';
+        return `
         <div class="thumb-card">
-          <img src="${src}" alt="Packaging ${idx + 1}" data-lightbox-src="${src}" data-lightbox-title="Packaging Photo ${idx + 1}" />
+          <img src="${escapeHtml(src)}" alt="Packaging ${idx + 1}" data-lightbox-src="${escapeHtml(src)}" data-lightbox-title="Packaging Photo ${idx + 1}" />
+          ${statusLabel ? `<span class="thumb-status ${item.status === 'ready' ? 'ready' : ''}" data-draft-status="${escapeHtml(item.id)}">${statusLabel}</span>` : ''}
           <button type="button" class="thumb-del" data-remove-pkg="${idx}" aria-label="Remove">&times;</button>
         </div>
-      `
-      )
+      `;
+      })
       .join('');
 
     els.packagingGallery.querySelectorAll('[data-remove-pkg]').forEach((btn) => {
       btn.addEventListener('click', () => {
         const idx = parseInt(btn.getAttribute('data-remove-pkg'), 10);
-        state.packagingImagesBase64.splice(idx, 1);
+        const [removed] = state.packagingItems.splice(idx, 1);
+        if (removed && !removed.existingLocalUrl) {
+          discardDraftPackagingPhoto(removed);
+        }
         renderPackagingGallery();
       });
     });
@@ -1514,11 +1665,11 @@
   }
 
   // ==========================================================================
-  // SUBMIT DISPATCH
+  // SUBMIT / UPDATE DISPATCH
   // ==========================================================================
 
   async function handleSubmitDispatch(e) {
-    e.preventDefault();
+    if (e && typeof e.preventDefault === 'function') e.preventDefault();
 
     if (!validateFormAndFocus(els.dispatchForm)) {
       showBanner('error', 'Please enter Customer Name, Tracking Number, and Order Date.');
@@ -1541,35 +1692,74 @@
       return;
     }
 
-    const origText = els.submitDispatchBtn.textContent;
-    els.submitDispatchBtn.disabled = true;
-    els.submitDispatchBtn.textContent = 'Saving...';
+    const isEditing = Boolean(state.editingDispatchId);
+    const targetEditId = state.editingDispatchId;
 
-    const slipSnapshot = state.trackingSlipBase64;
-    const packagingSnapshot = state.packagingImagesBase64.slice();
+    els.submitDispatchBtn.disabled = true;
+    els.submitDispatchBtn.textContent = isEditing ? 'Updating...' : 'Saving...';
+
+    // Wait briefly for any in-flight background draft photo uploads to finish
+    const pendingUploads = state.packagingItems
+      .filter((it) => it.uploadPromise && it.status === 'uploading')
+      .map((it) => it.uploadPromise);
+    if (pendingUploads.length > 0) {
+      await Promise.allSettled(pendingUploads);
+    }
+
+    const keptPackagingUrls = [];
+    const packagingDrafts = [];
+    const fallbackPackagingImages = [];
+
+    for (const item of state.packagingItems) {
+      if (item.existingLocalUrl) {
+        keptPackagingUrls.push(item.existingLocalUrl);
+      } else if (item.status === 'ready' && item.draftId) {
+        packagingDrafts.push({
+          draftId: item.draftId,
+          driveFileId: item.driveFileId || '',
+          driveUrl: item.driveUrl || ''
+        });
+      } else if (item.dataUrl) {
+        fallbackPackagingImages.push(item.dataUrl);
+      }
+    }
+
+    const slipToSend = !isEditing || state.trackingSlipReplaced ? state.trackingSlipBase64 : null;
 
     try {
-      const res = await fetch('/api/dispatches', {
-        method: 'POST',
+      const endpoint = isEditing
+        ? `/api/dispatches/${encodeURIComponent(targetEditId)}`
+        : '/api/dispatches';
+      const method = isEditing ? 'PUT' : 'POST';
+
+      const payloadBody = {
+        orderNumber,
+        customerName,
+        trackingNumber,
+        orderDate,
+        staffName: state.staffName,
+        products,
+        trackingSlipImage: slipToSend,
+        packagingDrafts,
+        packagingImages: fallbackPackagingImages
+      };
+      if (isEditing) {
+        payloadBody.keptPackagingUrls = keptPackagingUrls;
+        payloadBody.removeTrackingSlip = Boolean(state.trackingSlipRemoved && !state.trackingSlipBase64);
+      }
+
+      const res = await fetch(endpoint, {
+        method,
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderNumber,
-          customerName,
-          trackingNumber,
-          orderDate,
-          staffName: state.staffName,
-          products,
-          trackingSlipImage: slipSnapshot,
-          packagingImages: packagingSnapshot
-        })
+        body: JSON.stringify(payloadBody)
       }).then((r) => r.json());
 
       if (!res.success) {
-        throw new Error(res.error || 'Failed to save dispatch');
+        throw new Error(res.error || (isEditing ? 'Failed to update dispatch' : 'Failed to save dispatch'));
       }
 
       const d = res.dispatch;
-      if (d.syncStatus === 'pending_sync' && state.config.googleScriptUrl && isHostNetworkFailure(d.syncError)) {
+      if (!isEditing && d.syncStatus === 'pending_sync' && state.config.googleScriptUrl && isHostNetworkFailure(d.syncError)) {
         try {
           const gsRes = await callAppsScriptPost(state.config.googleScriptUrl, {
             action: 'createDispatch',
@@ -1580,8 +1770,11 @@
             customerName: d.customerName,
             staffName: d.staffName,
             products: d.products,
-            trackingSlipImage: slipSnapshot || null,
-            packagingImages: packagingSnapshot
+            trackingSlipImage: slipToSend || null,
+            preUploadedPackaging: packagingDrafts
+              .filter((x) => x.driveFileId)
+              .map((x) => ({ fileId: x.driveFileId, url: x.driveUrl })),
+            packagingImages: fallbackPackagingImages
           });
           if (gsRes && gsRes.success) {
             d.syncStatus = 'synced';
@@ -1601,7 +1794,9 @@
         }
       }
 
-      if (d.syncStatus === 'synced') {
+      if (isEditing) {
+        showBanner('success', `Updated ${d.trackingNumber} for ${d.customerName}.`);
+      } else if (d.syncStatus === 'synced') {
         showBanner('success', `Saved ${d.trackingNumber} for ${d.customerName} and synced to Google Sheets.`);
       } else if (d.syncStatus === 'pending_sync') {
         showBanner('warning', `Saved locally (${d.dispatchId}). Google Sheets sync pending: ${d.syncError}`);
@@ -1609,26 +1804,38 @@
         showBanner('success', `Saved locally (${d.dispatchId}). Connect Google Sheet in Admin Settings to auto-sync.`);
       }
 
-      resetDispatchForm(false);
+      resetDispatchForm(false, false);
       await loadDispatches();
       window.scrollTo({ top: 0, behavior: 'smooth' });
     } catch (err) {
-      showBanner('error', 'Save failed: ' + err.message);
+      showBanner('error', (isEditing ? 'Update failed: ' : 'Save failed: ') + err.message);
+      els.submitDispatchBtn.textContent = isEditing ? 'Update Dispatch' : 'Save Dispatch';
     } finally {
       els.submitDispatchBtn.disabled = false;
-      els.submitDispatchBtn.textContent = origText;
     }
   }
 
-  function resetDispatchForm(clearBanner = true) {
+  function resetDispatchForm(clearBanner = true, discardDrafts = true) {
+    if (discardDrafts) {
+      for (const item of state.packagingItems) {
+        if (!item.existingLocalUrl) discardDraftPackagingPhoto(item);
+      }
+    }
+    state.editingDispatchId = null;
+    state.trackingSlipReplaced = false;
+    state.trackingSlipRemoved = false;
+    if (els.editingModeBanner) els.editingModeBanner.classList.add('hidden');
+    if (els.submitDispatchBtn) els.submitDispatchBtn.textContent = 'Save Dispatch';
+
     clearTrackingSlip();
+    els.dispatchForm?.reset();
     els.orderNumberInput.value = '';
     els.customerNameInput.value = '';
     els.trackingNumberInput.value = '';
     els.orderDateInput.value = getTodayIsoDate();
     els.productRowsContainer.innerHTML = '';
     addProductRow();
-    state.packagingImagesBase64 = [];
+    state.packagingItems = [];
     renderPackagingGallery();
     resetFormValidation(els.dispatchForm);
     updateOrderNumberReminder();
@@ -1657,7 +1864,7 @@
           }
         }
 
-        els.productsCountBadge.textContent = String(state.productsCatalog.length);
+        if (els.productsCountBadge) els.productsCountBadge.textContent = String(state.productsCatalog.length);
         renderCatalogTable();
         if (syncWithGoogle) {
           showBanner('success', `Catalog synced (${state.productsCatalog.length} products).`);
@@ -1742,7 +1949,7 @@
           }
         }
         state.productsCatalog = productsList;
-        els.productsCountBadge.textContent = String(state.productsCatalog.length);
+        if (els.productsCountBadge) els.productsCountBadge.textContent = String(state.productsCatalog.length);
         renderCatalogTable();
         els.newProdSku.value = '';
         els.newProdCategory.value = '';
@@ -1814,7 +2021,7 @@
         }
       }
 
-      els.historyCountBadge.textContent = String(res.total ?? state.dispatches.length);
+      if (els.historyCountBadge) els.historyCountBadge.textContent = String(res.total ?? state.dispatches.length);
       renderDispatchesList();
     } catch (err) {
       console.error('Failed to load dispatches:', err);
@@ -1873,6 +2080,7 @@
           ? `<a href="${escapeHtml(d.driveFolderUrl)}" target="_blank" rel="noopener" class="btn btn-xs btn-outline">Drive</a>`
           : '';
 
+        const editBtn = `<button type="button" class="btn btn-xs btn-outline" data-edit-id="${escapeHtml(d.dispatchId)}">Edit</button>`;
         const deleteBtn = `<button type="button" class="btn btn-xs btn-outline" data-delete-id="${escapeHtml(d.dispatchId)}" data-delete-label="${escapeHtml(d.customerName || d.trackingNumber || d.dispatchId)}">Remove</button>`;
 
         return `
@@ -1888,7 +2096,7 @@
               <div>${d.orderNumber ? `<strong>Order #:</strong> <span class="mono">${escapeHtml(d.orderNumber)}</span> &middot; ` : ''}<strong>Order Date:</strong> ${escapeHtml(d.orderDate || '-')} &middot; <strong>Staff:</strong> ${escapeHtml(d.staffName || d.staffMember || '-')}</div>
               <div><strong>Items (${d.totalQty || 0}):</strong> ${productsText || '-'}</div>
             </div>
-            <div class="history-thumbs">${thumbs.join('')}${driveLink}${retryBtn}${deleteBtn}</div>
+            <div class="history-thumbs">${thumbs.join('')}${driveLink}${retryBtn}${editBtn}${deleteBtn}</div>
           </div>
         `;
       })
@@ -1897,6 +2105,12 @@
     els.dispatchesListContainer.querySelectorAll('[data-lightbox-src]').forEach((img) => {
       img.addEventListener('click', () => {
         openLightbox(img.getAttribute('data-lightbox-src'), img.getAttribute('data-lightbox-title'));
+      });
+    });
+
+    els.dispatchesListContainer.querySelectorAll('[data-edit-id]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        startEditingDispatch(btn.getAttribute('data-edit-id'));
       });
     });
 
@@ -1963,6 +2177,73 @@
         }
       });
     });
+  }
+
+  function startEditingDispatch(dispatchId) {
+    const d = state.dispatches.find((item) => item.dispatchId === dispatchId);
+    if (!d) return;
+
+    // Discard any unsaved drafts from a previous incomplete entry
+    for (const item of state.packagingItems) {
+      if (!item.existingLocalUrl) discardDraftPackagingPhoto(item);
+    }
+
+    state.editingDispatchId = d.dispatchId;
+    state.trackingSlipReplaced = false;
+    state.trackingSlipRemoved = false;
+
+    if (els.editingModeBanner) els.editingModeBanner.classList.remove('hidden');
+    if (els.editingModeText) {
+      els.editingModeText.textContent = `Editing dispatch ${d.dispatchId} (${d.customerName || d.trackingNumber || 'Saved'})`;
+    }
+    if (els.submitDispatchBtn) els.submitDispatchBtn.textContent = 'Update Dispatch';
+
+    els.orderNumberInput.value = d.orderNumber || '';
+    els.customerNameInput.value = d.customerName || '';
+    els.trackingNumberInput.value = d.trackingNumber || d.connote || '';
+    els.orderDateInput.value = d.orderDate || getTodayIsoDate();
+
+    els.productRowsContainer.innerHTML = '';
+    const prods = Array.isArray(d.products) && d.products.length > 0 ? d.products : [];
+    if (prods.length === 0) {
+      addProductRow();
+    } else {
+      prods.forEach((p) => {
+        addProductRow({
+          sku: p.sku || '',
+          name: p.name || '',
+          quantity: Math.max(1, Number(p.quantity) || 1),
+          location: p.location || ''
+        });
+      });
+    }
+
+    if (d.localTrackingSlipUrl) {
+      setTrackingSlipImage(d.localTrackingSlipUrl, false);
+    } else {
+      clearTrackingSlip();
+      state.trackingSlipRemoved = false;
+    }
+
+    state.packagingItems = (Array.isArray(d.localPackagingUrls) ? d.localPackagingUrls : []).map(
+      (u, idx) => ({
+        id: `existing-${idx}-${Date.now()}`,
+        previewUrl: u,
+        dataUrl: null,
+        existingLocalUrl: u,
+        draftId: null,
+        driveFileId: '',
+        driveUrl: '',
+        status: 'saved',
+        uploadPromise: null
+      })
+    );
+    renderPackagingGallery();
+    resetFormValidation(els.dispatchForm);
+    updateOrderNumberReminder();
+
+    document.getElementById('tabBtnDispatch')?.click();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   async function handleConfirmDeleteDispatch() {
@@ -2436,10 +2717,45 @@
       });
     }
 
-    els.wifiUrlsList.innerHTML =
-      addresses.length > 0
-        ? addresses.map((a) => `<div class="wifi-url-pill">${escapeHtml(a.url)}</div>`).join('')
-        : `<div class="wifi-url-pill">${escapeHtml(window.location.origin)}</div>`;
+    const urlList = addresses.length > 0 ? addresses.map((a) => a.url) : [window.location.origin];
+    const copySvg =
+      '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>';
+    const checkSvg =
+      '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>';
+
+    els.wifiUrlsList.innerHTML = urlList
+      .map(
+        (u) => `
+        <div class="wifi-url-pill">
+          <span class="wifi-url-text">${escapeHtml(u)}</span>
+          <button type="button" class="wifi-copy-btn" data-url="${escapeHtml(u)}" aria-label="Copy link" title="Copy link">
+            ${copySvg}
+          </button>
+        </div>`
+      )
+      .join('');
+
+    els.wifiUrlsList.querySelectorAll('.wifi-copy-btn').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const urlToCopy = btn.getAttribute('data-url') || '';
+        try {
+          await navigator.clipboard.writeText(urlToCopy);
+        } catch (e) {
+          const ta = document.createElement('textarea');
+          ta.value = urlToCopy;
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          ta.remove();
+        }
+        btn.classList.add('copied');
+        btn.innerHTML = checkSvg;
+        setTimeout(() => {
+          btn.classList.remove('copied');
+          btn.innerHTML = copySvg;
+        }, 1600);
+      });
+    });
   }
 
   function openLightbox(src, title) {

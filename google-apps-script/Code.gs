@@ -285,6 +285,29 @@ function doPost(e) {
       });
     }
 
+    if (action === 'uploadDraftPhoto') {
+      if (!body.imageBase64) {
+        return jsonResponse_({ success: false, error: 'imageBase64 is required.' });
+      }
+      const draftsFolder = getOrCreateDraftsFolder_();
+      const draftId = String(body.draftId || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const saved = saveBase64ImageToFolder_(draftsFolder, body.imageBase64, `Draft_${draftId}.jpg`);
+      if (!saved) {
+        return jsonResponse_({ success: false, error: 'Failed to save draft photo to Drive.' });
+      }
+      return jsonResponse_({ success: true, draftId: draftId, fileId: saved.id, url: saved.url });
+    }
+
+    if (action === 'deleteDraftPhoto') {
+      const fileId = String(body.fileId || '').trim();
+      if (fileId) {
+        try {
+          DriveApp.getFileById(fileId).setTrashed(true);
+        } catch (e) {}
+      }
+      return jsonResponse_({ success: true });
+    }
+
     if (action === 'createDispatch') {
       let dispatchSheet = ss.getSheetByName(CONFIG.DISPATCH_SHEET_NAME);
       if (!dispatchSheet) {
@@ -346,13 +369,20 @@ function doPost(e) {
       const packagingDriveUrls = [];
       let firstPackagingThumbId = '';
 
+      if (Array.isArray(body.preUploadedPackaging)) {
+        const moved = moveDraftFilesToFolder_(dispatchFolder, body.preUploadedPackaging, safeTrack, 1);
+        moved.urls.forEach((u) => packagingDriveUrls.push(u));
+        if (moved.firstThumbId) firstPackagingThumbId = moved.firstThumbId;
+      }
+
       if (Array.isArray(body.packagingImages)) {
+        const offset = packagingDriveUrls.length;
         body.packagingImages.forEach((imgBase64, index) => {
           if (!imgBase64) return;
           const savedPkg = saveBase64ImageToFolder_(
             dispatchFolder,
             imgBase64,
-            `Packaging_${index + 1}_${safeTrack}.jpg`
+            `Packaging_${offset + index + 1}_${safeTrack}.jpg`
           );
           if (savedPkg) {
             packagingDriveUrls.push(savedPkg.url);
@@ -450,6 +480,129 @@ function doPost(e) {
         }
       }
       return jsonResponse_({ success: true, deleted: deleted, dispatchId: dispatchId });
+    }
+
+    if (action === 'updateDispatch') {
+      const dispatchId = String(body.dispatchId || '').trim();
+      if (!dispatchId) {
+        return jsonResponse_({ success: false, error: 'dispatchId is required.' });
+      }
+      const dispatchSheet = ss.getSheetByName(CONFIG.DISPATCH_SHEET_NAME);
+      if (!dispatchSheet || dispatchSheet.getLastRow() < 2) {
+        return jsonResponse_({ success: false, error: 'Dispatch sheet is empty.' });
+      }
+
+      const lastRow = dispatchSheet.getLastRow();
+      const ids = dispatchSheet.getRange(2, 1, lastRow - 1, 1).getDisplayValues();
+      let targetRow = -1;
+      for (let i = ids.length - 1; i >= 0; i--) {
+        if (String(ids[i][0] || '').trim() === dispatchId) {
+          targetRow = i + 2;
+          break;
+        }
+      }
+      if (targetRow === -1) {
+        return jsonResponse_({ success: false, error: 'Dispatch not found in sheet: ' + dispatchId });
+      }
+
+      const orderNumber = String(body.orderNumber || '').trim();
+      const orderDate = String(body.orderDate || '').trim();
+      const trackingNumber = String(body.trackingNumber || body.connote || '').trim();
+      const customerName = String(body.customerName || '').trim();
+      const staffName = String(body.staffName || body.staffMember || '').trim();
+      const products = Array.isArray(body.products) ? body.products : [];
+
+      let totalQty = 0;
+      const productLines = products.map((p) => {
+        const q = Number(p.quantity) || 1;
+        totalQty += q;
+        const skuPart = p.sku ? `[${p.sku}] ` : '';
+        const locPart = p.location ? ` (Loc: ${String(p.location).trim()})` : '';
+        return `${q}x ${skuPart}${p.name}${locPart}`;
+      });
+      const productsSummary = productLines.join('\n');
+
+      if (orderDate) dispatchSheet.getRange(targetRow, 3).setValue(orderDate);
+      dispatchSheet.getRange(targetRow, 4).setValue(trackingNumber);
+      dispatchSheet.getRange(targetRow, 5).setValue(customerName);
+      dispatchSheet.getRange(targetRow, 6).setValue(productsSummary);
+      dispatchSheet.getRange(targetRow, 7).setValue(totalQty);
+      dispatchSheet.getRange(targetRow, 8).setValue(staffName);
+      dispatchSheet.getRange(targetRow, 14).setValue(JSON.stringify(products));
+      dispatchSheet.getRange(targetRow, 15).setValue(orderNumber);
+
+      // Attach any newly added photos into the dispatch's Drive folder if provided
+      let driveFolderUrl = '';
+      const existingFormula = String(dispatchSheet.getRange(targetRow, 13).getFormula() || dispatchSheet.getRange(targetRow, 13).getValue() || '');
+      const urlMatch = existingFormula.match(/https:\/\/drive\.google\.com\/[^\s"']+/);
+      if (urlMatch) driveFolderUrl = urlMatch[0];
+
+      const hasNewSlip = Boolean(body.trackingSlipImage);
+      const hasNewPkg =
+        (Array.isArray(body.preUploadedPackaging) && body.preUploadedPackaging.length > 0) ||
+        (Array.isArray(body.packagingImages) && body.packagingImages.length > 0);
+
+      if (hasNewSlip || hasNewPkg) {
+        let dispatchFolder = null;
+        const folderIdMatch = driveFolderUrl.match(/[-\w]{25,}/);
+        if (folderIdMatch) {
+          try {
+            dispatchFolder = DriveApp.getFolderById(folderIdMatch[0]);
+          } catch (e) {}
+        }
+        if (!dispatchFolder) {
+          const mainFolder = getOrCreateMainDriveFolder_();
+          const safeTrack = (trackingNumber || dispatchId).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 35);
+          const safeCustomer = (customerName || 'Customer').replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 25);
+          dispatchFolder = mainFolder.createFolder(`${orderDate || 'Updated'}_${safeTrack}_${safeCustomer}`);
+          try {
+            dispatchFolder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+          } catch (e) {}
+          driveFolderUrl = dispatchFolder.getUrl();
+          dispatchSheet.getRange(targetRow, 13).setFormula(`=HYPERLINK("${driveFolderUrl}", "Open Folder")`);
+        }
+
+        const safeTrack = (trackingNumber || dispatchId).replace(/[^a-zA-Z0-9_-]/g, '_').substring(0, 35);
+        if (hasNewSlip) {
+          const savedSlip = saveBase64ImageToFolder_(dispatchFolder, body.trackingSlipImage, `TrackingSlip_${safeTrack}.jpg`);
+          if (savedSlip) {
+            dispatchSheet.getRange(targetRow, 9).setFormula(`=HYPERLINK("${savedSlip.url}", "View Tracking Slip")`);
+            dispatchSheet.getRange(targetRow, 10).setFormula(`=IMAGE("https://drive.google.com/thumbnail?id=${savedSlip.id}&sz=w400")`);
+          }
+        }
+        if (hasNewPkg) {
+          const addedUrls = [];
+          let firstNewThumb = '';
+          if (Array.isArray(body.preUploadedPackaging)) {
+            const moved = moveDraftFilesToFolder_(dispatchFolder, body.preUploadedPackaging, safeTrack, 1);
+            moved.urls.forEach((u) => addedUrls.push(u));
+            if (moved.firstThumbId) firstNewThumb = moved.firstThumbId;
+          }
+          if (Array.isArray(body.packagingImages)) {
+            body.packagingImages.forEach((imgB64, idx) => {
+              if (!imgB64) return;
+              const savedPkg = saveBase64ImageToFolder_(dispatchFolder, imgB64, `Packaging_${addedUrls.length + idx + 1}_${safeTrack}.jpg`);
+              if (savedPkg) {
+                addedUrls.push(savedPkg.url);
+                if (!firstNewThumb) firstNewThumb = savedPkg.id;
+              }
+            });
+          }
+          if (addedUrls.length > 0 && !String(dispatchSheet.getRange(targetRow, 12).getFormula() || '')) {
+            dispatchSheet.getRange(targetRow, 11).setValue(addedUrls.join('\n'));
+            if (firstNewThumb) {
+              dispatchSheet.getRange(targetRow, 12).setFormula(`=IMAGE("https://drive.google.com/thumbnail?id=${firstNewThumb}&sz=w400")`);
+            }
+          }
+        }
+      }
+
+      return jsonResponse_({
+        success: true,
+        dispatchId: dispatchId,
+        rowNumber: targetRow,
+        driveFolderUrl: driveFolderUrl
+      });
     }
 
     return jsonResponse_({ success: false, error: 'Unknown action: ' + action });
@@ -724,6 +877,36 @@ function getOrCreateMainDriveFolder_() {
   const folders = DriveApp.getFoldersByName(CONFIG.DRIVE_MAIN_FOLDER_NAME);
   if (folders.hasNext()) return folders.next();
   return DriveApp.createFolder(CONFIG.DRIVE_MAIN_FOLDER_NAME);
+}
+
+function getOrCreateDraftsFolder_() {
+  const main = getOrCreateMainDriveFolder_();
+  const subs = main.getFoldersByName('_Drafts');
+  if (subs.hasNext()) return subs.next();
+  return main.createFolder('_Drafts');
+}
+
+function moveDraftFilesToFolder_(dispatchFolder, preUploadedList, safeTrack, startIndex) {
+  const urls = [];
+  let firstThumbId = '';
+  let idx = startIndex || 1;
+  (preUploadedList || []).forEach((item) => {
+    if (!item || !item.fileId) return;
+    try {
+      const file = DriveApp.getFileById(String(item.fileId));
+      file.moveTo(dispatchFolder);
+      file.setName(`Packaging_${idx}_${safeTrack}.jpg`);
+      urls.push(file.getUrl());
+      if (!firstThumbId) firstThumbId = file.getId();
+      idx++;
+    } catch (e) {
+      if (item.url) {
+        urls.push(item.url);
+        idx++;
+      }
+    }
+  });
+  return { urls: urls, firstThumbId: firstThumbId };
 }
 
 function saveBase64ImageToFolder_(folder, dataUrl, filename) {

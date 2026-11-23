@@ -31,6 +31,9 @@
     /\b191\s+m[ceoa]?cred/i,
     /(?:smithfield|shtmied|shithfield).*2164/i,
     /\b(?:nsw\s*2164|2164\s*nsw)\b/i,
+    /po\s*box\s*5001/i,
+    /greystanes.*2145/i,
+    /\b(?:nsw\s*2145|2145\s*nsw)\b/i,
     /undeliverable\s*add?r?ess|return\s*add?r?ess|if\s*undeliverable|ship\s*from|dispatched\s*(?:by|from)/i,
     /aviation\s*security|dangerous\s*goods|false\s*declaration|criminal\s*offence|prohibited\s*goods/i,
     /^from\s*[:;]/i,
@@ -43,18 +46,19 @@
     /\b0[23478]\d{2}[\s-]?\d{3}[\s-]?\d{3}\b/,
     /^(?:deliver\s*to|ship\s*[t1][o0]|deliver\s*[t1][o0]|send\s*to|receiver|recipient|consignee|attention|attn|customer|buyer|[t1]o)\b/i,
     /couriers?\s*p[l1i]ease|cowniers/i,
-    /australia\s*post|auspost|eparcel|parcel\s*post|express\s*post/i,
+    /australia\s*post|auspost|eparcel|parcel\s*post|express\s*post|mypost\s*business|postage\s*paid/i,
     /startrack|star\s*track|aramex|fastway|allied\s*express|direct\s*freight|sendle|fedex|\btnt\b|\bdhl\b|team\s*global|my\s*toll|\btoll\b|border\s*express|hunter\s*express|amazon|ebay|shopify|shippit|interparcel|dai\s*post|hi-?trans/i,
     /^(?:connote|conn0te|con\s*no|con\s*note|consignment|tracking|ap\s*article|article\s*id|label\s*no|awb|waybill|sscc)\b/i,
     /^\d+(?:\.\d+)?\s*(?:g|gram|kg)\b/i,
     /\d+(?:\.\d+)?\s*[*x×"•]\s*\d+(?:\.\d+)?/,
     /^special\s*instructions|^delivery\s*instructions|^signature\b/i,
     /\b(?:residential|commercial|authority\s*to\s*leave|leave\s*in\s*a\s*safe\s*place|safe\s*place)\b/i,
+    /\b(?:small|medium|large|extra\s*large)\s*satchel\b|^satchel$|^packaging$|^declared\s*weight|^cubic\s*weight|^delivery\s*features|^up\s*to\s*\d+\s*kg|^n\/a$/i,
     /^pkg\s*\d+\s*of\s*\d+/i,
     /^item\s*\d+\s*of\s*\d+/i,
     /^parcel\s*\d+/i,
     /^order\s*(?:id|no|number|#)/i,
-    /^reference\b/i,
+    /^(?:reference|ref)\b/i,
     /^destination\s*[:;]/i,
     /^australia$/i,
     /\bfragile\b|handle\s*with|^care\b|^atl\b/i,
@@ -124,8 +128,9 @@
 
   function isSuburbPostcodeLine(line, prevLine) {
     if (!line) return false;
-    // Reject sender postcode 2164 alongside Smithfield / NSW
+    // Reject Aimex sender postcodes (Smithfield 2164 & Greystanes 2145)
     if (/(?:smithfield|shtmied|shithfield|nsw)/i.test(line) && /\b2164\b/.test(line)) return false;
+    if (/(?:greystanes|nsw)/i.test(line) && /\b2145\b/.test(line)) return false;
 
     const stateRe = new RegExp(`\\b(${AU_STATES.join('|')})\\b`, 'i');
     const postcodeRe = /\b\d{4}\b/;
@@ -246,6 +251,17 @@
       return aramexMatch[1] + digits;
     }
 
+    // Australia Post MyPost Business all-numeric Article ID (e.g. 99724133483201008320904, 18-24 digits starting with 997)
+    const mpMatch = code.match(/^(997[0-9OISBZ]{15,22})$/);
+    if (mpMatch) {
+      return mpMatch[1]
+        .replace(/O/g, '0')
+        .replace(/I/g, '1')
+        .replace(/S/g, '5')
+        .replace(/B/g, '8')
+        .replace(/Z/g, '2');
+    }
+
     return code;
   }
 
@@ -289,7 +305,8 @@
     if (!code || isFalseTrackingToken(code)) return false;
     return (
       /^[0-9]{2}[A-Z]{2,3}[0-9]{7,20}$/.test(code) || // AusPost eParcel
-      /^CP[A-Z]{5}[0-9]{6,9}$/.test(code) ||        // CouriersPlease
+      /^997\d{15,22}$/.test(code) ||                  // AusPost MyPost Business
+      /^CP[A-Z]{5}[0-9]{6,9}$/.test(code) ||          // CouriersPlease
       /^[A-Z]{2}\d{9}AU$/.test(code) ||               // UPU S10 AU
       /^(?:MP|FW|QQ|AZ|NZ|RZ|SZ|PX|CW|SY|ML|BN)\d{10}$/.test(code) || // Aramex / Fastway
       /^(?:JD01|JJD|GM)\d{10,20}$/.test(code) ||      // DHL eCommerce / Express
@@ -398,6 +415,15 @@
       const norm = normalizeTrackingCode(m[1]);
       if (!isFalseTrackingToken(norm) && /^[0-9]{2}[A-Z]{3}[0-9]{7,20}$/.test(norm)) {
         candidates.push({ code: norm, priority: 3, explicit: false, carrierBonus: norm.length >= 16 ? 92 : 86 });
+      }
+    }
+
+    // 2a-2. Australia Post MyPost Business vertical/numeric Article ID (starts with 997, 18-25 digits)
+    const mpRe = /\b(997[0-9OISBZ]{15,22})\b/gi;
+    while ((m = mpRe.exec(normalizedAll)) !== null) {
+      const norm = normalizeTrackingCode(m[1]);
+      if (!isFalseTrackingToken(norm) && /^997\d{15,22}$/.test(norm)) {
+        candidates.push({ code: norm, priority: 3, explicit: false, carrierBonus: 92 });
       }
     }
 

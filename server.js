@@ -26,6 +26,7 @@ const TIMEZONE = 'Australia/Sydney';
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const DATA_DIR = path.join(__dirname, 'data');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
+const DRAFTS_DIR = path.join(UPLOADS_DIR, '_drafts');
 const OCR_DIR = path.join(__dirname, 'ocr');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 const DISPATCHES_FILE = path.join(DATA_DIR, 'dispatches.json');
@@ -34,7 +35,7 @@ const USER_PREFS_FILE = path.join(DATA_DIR, 'user-prefs.json');
 const DEFAULT_PRODUCTS_FILE = path.join(__dirname, 'default-products.json');
 const APPS_SCRIPT_FILE = path.join(__dirname, 'google-apps-script', 'Code.gs');
 
-for (const dir of [PUBLIC_DIR, DATA_DIR, UPLOADS_DIR, OCR_DIR]) {
+for (const dir of [PUBLIC_DIR, DATA_DIR, UPLOADS_DIR, DRAFTS_DIR, OCR_DIR]) {
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
@@ -818,8 +819,13 @@ async function callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId) {
 
   const prompt = `Extract shipping label details for Aimex Australia Pty Ltd.
 IMPORTANT RULES:
-1. "customerName": Extract the RECIPIENT / "Deliver To:" / "Ship To:" / "To:" full name or company name. NEVER extract the sender ("From: Aimex Australia Pty Ltd", "Undeliverable Address: Aimex Australia", "Smithfield NSW 2164"). Ignore package weights ("4.86 kg."), "Pkg 1 of 1", "RESIDENTIAL", or phone numbers.
-2. "trackingNumber": Extract the primary Tracking / Connote / Consignment / AP Article Id number across any carrier (Australia Post eParcel "AP Article Id" e.g. "39BCX500052901000931505" preferred over short "Con No", CouriersPlease Connote e.g. "CPCTOZE0000179" or standalone "CPBHZST1575833", Aramex/Fastway, StarTrack, Sendle, Toll/TGE, TNT, FedEx, DHL, Direct Freight, Allied). Do NOT use depot codes (like "D4A270", "T4A259"), Amazon "Order Id" (like "503-0624319-3869418"), or QR side text.
+1. "customerName": Extract the RECIPIENT / "Deliver To:" / "Ship To:" / "To:" full name or company name (if repeated twice on two lines, return just one clean name). NEVER extract the sender ("From: Aimex Australia Pty Ltd", "Sender: Aimex Australia", "PO Box 5001 Greystanes NSW 2145", "Smithfield NSW 2164"). Ignore package weights ("4.86 kg."), "Small Satchel", "Pkg 1 of 1", "RESIDENTIAL", or phone numbers.
+2. "trackingNumber": Extract the primary Tracking / Connote / Consignment / AP Article Id number across any carrier:
+   - Australia Post MyPost Business: check for VERTICALLY rotated (reading top-to-bottom) text printed along the right-hand side next to the tall vertical barcode ("AP Article Id: 997...", e.g. "99724133483201008320904" — return only the alphanumeric ID itself, without "AP Article Id:").
+   - Australia Post eParcel: "AP Article Id" (e.g. "39BCX500052901000931505") preferred over short "Con No".
+   - CouriersPlease: Connote (e.g. "CPCTOZE0000179") or standalone "CP..." (e.g. "CPBHZST1575833").
+   - Other carriers: Aramex/Fastway, StarTrack, Sendle, Toll/TGE, TNT, FedEx, DHL, Direct Freight, Allied.
+   Do NOT use 8-digit account/manifest numbers (like "63512384"), 4-digit footers ("1123"), "Ref:" order numbers ("14557"), depot codes ("D4A270", "T4A259"), Amazon "Order Id" ("503-0624319-3869418"), or QR side text.
 3. "orderDate": YYYY-MM-DD if an order or dispatch date is printed on the label, otherwise "".
 Return ONLY a valid JSON object with keys: "customerName", "trackingNumber", "orderDate".`;
 
@@ -2078,6 +2084,81 @@ function findGitBinary() {
       return res.end(rows.join('\r\n'));
     }
 
+    // 6b. Background Draft Photo Upload / Discard
+    if (pathname === '/api/draft-photos' && req.method === 'POST') {
+      const body = await parseJsonBody(req);
+      if (!body.imageBase64) {
+        return sendJson(res, 400, { success: false, error: 'Missing imageBase64' });
+      }
+      const rawDraftId = String(body.draftId || `draft-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
+      const safeDraftId = rawDraftId.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+      let cleanBase64 = body.imageBase64;
+      if (cleanBase64.includes('base64,')) {
+        cleanBase64 = cleanBase64.split('base64,')[1];
+      }
+      const draftPath = path.join(DRAFTS_DIR, `${safeDraftId}.jpg`);
+      fs.writeFileSync(draftPath, Buffer.from(cleanBase64, 'base64'));
+      const localUrl = `/uploads/_drafts/${safeDraftId}.jpg`;
+
+      let driveFileId = '';
+      let driveUrl = '';
+      const config = getConfig();
+      if (config.googleScriptUrl) {
+        try {
+          const gsPayload = JSON.stringify({
+            action: 'uploadDraftPhoto',
+            draftId: safeDraftId,
+            imageBase64: body.imageBase64
+          });
+          const gsRes = await fetchWithRedirects(config.googleScriptUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(gsPayload)
+            },
+            body: gsPayload,
+            timeout: 35000
+          });
+          if (gsRes.json && gsRes.json.success && gsRes.json.fileId) {
+            driveFileId = String(gsRes.json.fileId);
+            driveUrl = String(gsRes.json.url || '');
+          }
+        } catch (err) {
+          console.warn('Draft Drive upload fallback (kept locally):', err.message);
+        }
+      }
+
+      return sendJson(res, 200, {
+        success: true,
+        draftId: safeDraftId,
+        localUrl,
+        driveFileId,
+        driveUrl
+      });
+    }
+
+    const deleteDraftMatch = pathname.match(/^\/api\/draft-photos\/([^/]+)$/);
+    if (deleteDraftMatch && req.method === 'DELETE') {
+      const safeDraftId = decodeURIComponent(deleteDraftMatch[1]).replace(/[^a-zA-Z0-9_-]/g, '_');
+      const draftPath = path.join(DRAFTS_DIR, `${safeDraftId}.jpg`);
+      try {
+        if (fs.existsSync(draftPath)) fs.unlinkSync(draftPath);
+      } catch (e) {}
+
+      const driveFileId = (parsedUrl.searchParams.get('driveFileId') || '').trim();
+      const config = getConfig();
+      if (driveFileId && config.googleScriptUrl) {
+        fetchWithRedirects(config.googleScriptUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'deleteDraftPhoto', fileId: driveFileId }),
+          timeout: 15000
+        }).catch(() => {});
+      }
+      return sendJson(res, 200, { success: true });
+    }
+
     if (pathname === '/api/dispatches' && req.method === 'POST') {
       const body = await parseJsonBody(req);
       const dispatches = readJsonFile(DISPATCHES_FILE, []);
@@ -2114,10 +2195,48 @@ function findGitBinary() {
         : null;
 
       const localPackagingUrls = [];
+      const preUploadedPackaging = [];
+      const gsFallbackPackagingImages = [];
+
+      const folder = path.join(UPLOADS_DIR, dispatchId);
+      if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
+
+      if (Array.isArray(body.packagingDrafts)) {
+        body.packagingDrafts.forEach((draft) => {
+          if (!draft || !draft.draftId) return;
+          const safeDraftId = String(draft.draftId).replace(/[^a-zA-Z0-9_-]/g, '_');
+          const draftPath = path.join(DRAFTS_DIR, `${safeDraftId}.jpg`);
+          const nextNum = localPackagingUrls.length + 1;
+          const destName = `packaging-${nextNum}.jpg`;
+          const destPath = path.join(folder, destName);
+          if (fs.existsSync(draftPath)) {
+            if (!draft.driveFileId) {
+              try {
+                const buf = fs.readFileSync(draftPath);
+                gsFallbackPackagingImages.push(`data:image/jpeg;base64,${buf.toString('base64')}`);
+              } catch (e) {}
+            }
+            try {
+              fs.renameSync(draftPath, destPath);
+            } catch (e) {
+              fs.copyFileSync(draftPath, destPath);
+              try { fs.unlinkSync(draftPath); } catch (e2) {}
+            }
+            localPackagingUrls.push(`/uploads/${dispatchId}/${destName}`);
+          }
+          if (draft.driveFileId) {
+            preUploadedPackaging.push({ fileId: draft.driveFileId, url: draft.driveUrl || '' });
+          }
+        });
+      }
+
       if (Array.isArray(body.packagingImages)) {
-        body.packagingImages.forEach((imgBase64, idx) => {
-          const saved = saveImageLocally(dispatchId, imgBase64, `packaging-${idx + 1}.jpg`);
+        body.packagingImages.forEach((imgBase64) => {
+          if (!imgBase64) return;
+          const nextNum = localPackagingUrls.length + 1;
+          const saved = saveImageLocally(dispatchId, imgBase64, `packaging-${nextNum}.jpg`);
           if (saved) localPackagingUrls.push(saved);
+          gsFallbackPackagingImages.push(imgBase64);
         });
       }
 
@@ -2160,7 +2279,8 @@ function findGitBinary() {
             staffName: record.staffName,
             products: record.products,
             trackingSlipImage: body.trackingSlipImage || null,
-            packagingImages: Array.isArray(body.packagingImages) ? body.packagingImages : []
+            preUploadedPackaging,
+            packagingImages: gsFallbackPackagingImages
           });
 
           const gsRes = await fetchWithRedirects(config.googleScriptUrl, {
@@ -2192,6 +2312,140 @@ function findGitBinary() {
       dispatches.unshift(record);
       writeJsonFile(DISPATCHES_FILE, dispatches);
 
+      return sendJson(res, 200, {
+        success: true,
+        dispatch: record
+      });
+    }
+
+    const updateMatch = pathname.match(/^\/api\/dispatches\/([^/]+)$/);
+    if (updateMatch && req.method === 'PUT') {
+      const targetId = decodeURIComponent(updateMatch[1]);
+      const body = await parseJsonBody(req);
+      const dispatches = readJsonFile(DISPATCHES_FILE, []);
+      const idx = dispatches.findIndex((d) => d.dispatchId === targetId);
+      if (idx === -1) {
+        return sendJson(res, 404, { success: false, error: 'Dispatch not found.' });
+      }
+
+      const record = dispatches[idx];
+      const config = getConfig();
+
+      const products = Array.isArray(body.products)
+        ? body.products
+            .filter((p) => p && String(p.name || '').trim())
+            .map((p) => ({
+              sku: String(p.sku || '').trim(),
+              name: String(p.name || '').trim(),
+              quantity: Math.max(1, Number(p.quantity) || 1),
+              location: String(p.location || '').trim()
+            }))
+        : record.products;
+
+      record.orderNumber = body.orderNumber !== undefined ? String(body.orderNumber || '').trim() : record.orderNumber || '';
+      record.orderDate = body.orderDate ? String(body.orderDate).trim() : record.orderDate;
+      record.trackingNumber = body.trackingNumber !== undefined ? String(body.trackingNumber || '').trim() : record.trackingNumber;
+      record.customerName = body.customerName !== undefined ? String(body.customerName || '').trim() : record.customerName;
+      record.staffName = body.staffName !== undefined ? String(body.staffName || '').trim() : record.staffName;
+      record.products = products;
+      record.totalQty = products.reduce((sum, p) => sum + p.quantity, 0);
+
+      if (body.removeTrackingSlip) {
+        record.localTrackingSlipUrl = null;
+      } else if (body.trackingSlipImage) {
+        record.localTrackingSlipUrl = saveImageLocally(targetId, body.trackingSlipImage, 'tracking-slip.jpg');
+      }
+
+      const kept = Array.isArray(body.keptPackagingUrls)
+        ? body.keptPackagingUrls.filter((u) => typeof u === 'string' && u.startsWith('/uploads/'))
+        : Array.isArray(record.localPackagingUrls)
+          ? record.localPackagingUrls.slice()
+          : [];
+
+      const preUploadedPackaging = [];
+      const gsFallbackPackagingImages = [];
+      const folder = path.join(UPLOADS_DIR, path.basename(targetId));
+      if (!fs.existsSync(folder)) fs.mkdirSync(folder, { recursive: true });
+
+      let nextIdx = kept.length + 1;
+      if (Array.isArray(body.packagingDrafts)) {
+        body.packagingDrafts.forEach((draft) => {
+          if (!draft || !draft.draftId) return;
+          const safeDraftId = String(draft.draftId).replace(/[^a-zA-Z0-9_-]/g, '_');
+          const draftPath = path.join(DRAFTS_DIR, `${safeDraftId}.jpg`);
+          const destName = `packaging-edit-${Date.now()}-${nextIdx}.jpg`;
+          const destPath = path.join(folder, destName);
+          if (fs.existsSync(draftPath)) {
+            if (!draft.driveFileId) {
+              try {
+                const buf = fs.readFileSync(draftPath);
+                gsFallbackPackagingImages.push(`data:image/jpeg;base64,${buf.toString('base64')}`);
+              } catch (e) {}
+            }
+            try {
+              fs.renameSync(draftPath, destPath);
+            } catch (e) {
+              fs.copyFileSync(draftPath, destPath);
+              try { fs.unlinkSync(draftPath); } catch (e2) {}
+            }
+            kept.push(`/uploads/${path.basename(targetId)}/${destName}`);
+            nextIdx++;
+          }
+          if (draft.driveFileId) {
+            preUploadedPackaging.push({ fileId: draft.driveFileId, url: draft.driveUrl || '' });
+          }
+        });
+      }
+
+      if (Array.isArray(body.packagingImages)) {
+        body.packagingImages.forEach((imgBase64) => {
+          if (!imgBase64) return;
+          const saved = saveImageLocally(path.basename(targetId), imgBase64, `packaging-edit-${Date.now()}-${nextIdx}.jpg`);
+          if (saved) kept.push(saved);
+          gsFallbackPackagingImages.push(imgBase64);
+          nextIdx++;
+        });
+      }
+
+      record.localPackagingUrls = kept;
+
+      if (config.googleScriptUrl) {
+        try {
+          const gsPayload = JSON.stringify({
+            action: 'updateDispatch',
+            dispatchId: record.dispatchId,
+            orderNumber: record.orderNumber,
+            orderDate: record.orderDate,
+            trackingNumber: record.trackingNumber,
+            customerName: record.customerName,
+            staffName: record.staffName,
+            products: record.products,
+            trackingSlipImage: body.trackingSlipImage || null,
+            preUploadedPackaging,
+            packagingImages: gsFallbackPackagingImages
+          });
+          const gsRes = await fetchWithRedirects(config.googleScriptUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Content-Length': Buffer.byteLength(gsPayload)
+            },
+            body: gsPayload,
+            timeout: 45000
+          });
+          if (gsRes.json && gsRes.json.success) {
+            record.syncStatus = 'synced';
+            record.syncError = null;
+            if (gsRes.json.driveFolderUrl) record.driveFolderUrl = gsRes.json.driveFolderUrl;
+          } else {
+            record.syncError = gsRes.json?.error || `Sheet update returned status ${gsRes.statusCode}`;
+          }
+        } catch (err) {
+          record.syncError = err.message;
+        }
+      }
+
+      writeJsonFile(DISPATCHES_FILE, dispatches);
       return sendJson(res, 200, {
         success: true,
         dispatch: record
