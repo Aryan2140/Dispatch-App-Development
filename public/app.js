@@ -539,6 +539,10 @@
     els.dispatchForm.addEventListener('submit', (e) => e.preventDefault());
     els.submitDispatchBtn.addEventListener('click', handleSubmitDispatch);
     els.resetFormBtn.addEventListener('click', () => {
+      if (state.editingDispatchId) {
+        resetDispatchForm(true);
+        return;
+      }
       if (els.confirmClearModal) {
         openModalDialog(els.confirmClearModal);
       } else {
@@ -1826,6 +1830,7 @@
     state.trackingSlipRemoved = false;
     if (els.editingModeBanner) els.editingModeBanner.classList.add('hidden');
     if (els.submitDispatchBtn) els.submitDispatchBtn.textContent = 'Save Dispatch';
+    if (els.resetFormBtn) els.resetFormBtn.textContent = 'Clear';
 
     clearTrackingSlip();
     els.dispatchForm?.reset();
@@ -2197,6 +2202,7 @@
       els.editingModeText.textContent = `Editing dispatch ${d.dispatchId} (${d.customerName || d.trackingNumber || 'Saved'})`;
     }
     if (els.submitDispatchBtn) els.submitDispatchBtn.textContent = 'Update Dispatch';
+    if (els.resetFormBtn) els.resetFormBtn.textContent = 'Cancel Edit';
 
     els.orderNumberInput.value = d.orderNumber || '';
     els.customerNameInput.value = d.customerName || '';
@@ -2504,8 +2510,48 @@
     try {
       const res = await adminFetch('/api/apps-script-code');
       if (!res.success || !res.code) throw new Error('Could not fetch Code.gs');
-      await navigator.clipboard.writeText(res.code);
-      showTestResult('success', 'Copied Code.gs to clipboard! Paste into Google Sheet -> Extensions -> Apps Script.');
+
+      let copied = false;
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(res.code);
+          copied = true;
+        } catch (clipErr) {}
+      }
+
+      if (!copied) {
+        // Append inside settingsModal because document.body is inert while a native <dialog> is open
+        const host = els.settingsModal?.open ? els.settingsModal : document.body;
+        const ta = document.createElement('textarea');
+        ta.value = res.code;
+        ta.setAttribute('readonly', '');
+        ta.style.position = 'fixed';
+        ta.style.top = '0';
+        ta.style.left = '-9999px';
+        ta.style.opacity = '0';
+        host.appendChild(ta);
+        ta.focus();
+        ta.select();
+        ta.setSelectionRange(0, res.code.length);
+        try {
+          copied = document.execCommand('copy');
+        } catch (execErr) {}
+        ta.remove();
+      }
+
+      if (copied) {
+        showTestResult('success', 'Copied Code.gs to clipboard! Paste into Google Sheet -> Extensions -> Apps Script.');
+      } else {
+        // Fallback: render a selectable textarea directly in the settings modal
+        els.googleTestResultBox.classList.remove('hidden');
+        els.googleTestResultBox.style.background = '#f8fafc';
+        els.googleTestResultBox.style.color = '#0f172a';
+        els.googleTestResultBox.innerHTML = `
+          <div style="margin-bottom:6px;font-weight:600;">Tap inside and copy Code.gs manually:</div>
+          <textarea readonly rows="5" style="width:100%;font-family:monospace;font-size:11px;padding:6px;border:1px solid #cbd5e1;border-radius:6px;">${escapeHtml(res.code)}</textarea>
+        `;
+        els.googleTestResultBox.querySelector('textarea')?.select();
+      }
     } catch (err) {
       showTestResult('error', 'Clipboard copy failed — open google-apps-script/Code.gs directly.');
     }

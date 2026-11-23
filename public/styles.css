@@ -1159,15 +1159,9 @@
     .product-search-wrap {
       grid-column: 1 / -1;
     }
-    .product-location-wrap .product-location-input {
-      border-radius: 999px;
-      padding-inline: 0.75rem;
-      min-block-size: var(--target-size);
-      font-size: 0.875rem;
-      background: var(--surface);
-    }
     .qty-stepper {
       justify-self: end;
+      border-radius: 999px;
     }
     .remove-prod-btn {
       justify-self: end;
