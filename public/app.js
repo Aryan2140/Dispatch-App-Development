@@ -545,22 +545,29 @@
     els.orderNumberInput?.addEventListener('input', updateOrderNumberReminder);
     els.syncProductsFromSheetBtn.addEventListener('click', () => loadProductsCatalog(true));
 
-    // Compact sticky header on scroll (with wide hysteresis to prevent mobile layout jitter)
+    // Compact sticky header on scroll (rAF + wide hysteresis prevents mobile sticky bounce)
     const headerEl = document.querySelector('.app-header');
     if (headerEl) {
       let lastToggleAt = 0;
+      let scrollRafId = 0;
+      const updateStickyHeader = () => {
+        scrollRafId = 0;
+        const now = Date.now();
+        if (now - lastToggleAt < 320) return;
+        const y = window.scrollY || 0;
+        if (y > 100 && !headerEl.classList.contains('is-scrolled')) {
+          headerEl.classList.add('is-scrolled');
+          lastToggleAt = now;
+        } else if (y <= 14 && headerEl.classList.contains('is-scrolled')) {
+          headerEl.classList.remove('is-scrolled');
+          lastToggleAt = now;
+        }
+      };
       window.addEventListener(
         'scroll',
         () => {
-          const now = Date.now();
-          if (now - lastToggleAt < 250) return;
-          const y = window.scrollY || 0;
-          if (y > 80 && !headerEl.classList.contains('is-scrolled')) {
-            headerEl.classList.add('is-scrolled');
-            lastToggleAt = now;
-          } else if (y <= 8 && headerEl.classList.contains('is-scrolled')) {
-            headerEl.classList.remove('is-scrolled');
-            lastToggleAt = now;
+          if (!scrollRafId) {
+            scrollRafId = window.requestAnimationFrame(updateStickyHeader);
           }
         },
         { passive: true }
@@ -601,6 +608,7 @@
     // Carrier selection & Tracking-to-Carrier fallback auto-detect
     els.carrierSelect?.addEventListener('change', () => {
       state.carrierManuallySelected = Boolean(els.carrierSelect.value);
+      syncCarrierPlaceholderStyle();
       els.carrierAutoBadge?.classList.add('hidden');
     });
     const onTrackingInputAutoCarrier = () => {
@@ -715,15 +723,21 @@
     return ['Australia Post', 'CouriersPlease', 'StarTrack', 'Aramex', 'Sendle', 'Team Global Express', 'TNT / FedEx', 'DHL', 'Direct Freight', 'Allied Express', 'Other'];
   }
 
+  function syncCarrierPlaceholderStyle() {
+    if (!els.carrierSelect) return;
+    els.carrierSelect.classList.toggle('is-placeholder', !els.carrierSelect.value);
+  }
+
   function populateCarrierSelect() {
     if (!els.carrierSelect) return;
     const prevVal = els.carrierSelect.value;
     const carriers = getConfiguredCarriers();
-    els.carrierSelect.innerHTML = `<option value="">Select carrier (auto-detected)...</option>` +
+    els.carrierSelect.innerHTML = `<option value="">(Auto-Detect)</option>` +
       carriers.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
     if (prevVal && carriers.includes(prevVal)) {
       els.carrierSelect.value = prevVal;
     }
+    syncCarrierPlaceholderStyle();
   }
 
   function resolveDispatchCarrier(carrierVal, trackingNumber) {
@@ -757,6 +771,7 @@
       els.carrierSelect.appendChild(opt);
       els.carrierSelect.value = resolved;
     }
+    syncCarrierPlaceholderStyle();
     els.carrierAutoBadge?.classList.remove('hidden');
   }
 
@@ -2086,7 +2101,10 @@
 
     clearTrackingSlip(discardDrafts);
     els.dispatchForm?.reset();
-    if (els.carrierSelect) els.carrierSelect.value = '';
+    if (els.carrierSelect) {
+      els.carrierSelect.value = '';
+      syncCarrierPlaceholderStyle();
+    }
     els.carrierAutoBadge?.classList.add('hidden');
     els.orderNumberInput.value = '';
     els.customerNameInput.value = '';
@@ -2809,6 +2827,7 @@
         els.carrierSelect.appendChild(opt);
       }
       els.carrierSelect.value = resolvedEditCarrier;
+      syncCarrierPlaceholderStyle();
     }
     state.carrierManuallySelected = Boolean(resolvedEditCarrier);
     els.carrierAutoBadge?.classList.add('hidden');
