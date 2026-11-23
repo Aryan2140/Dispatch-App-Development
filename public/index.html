@@ -215,6 +215,16 @@
             <div id="trackingSlipEmptyState" class="empty-box">
               No Tracking slip uploaded yet
             </div>
+
+            <div class="field-group slip-carrier-group">
+              <div class="label-row">
+                <label for="carrierSelect">Carrier</label>
+                <span id="carrierAutoBadge" class="meta-pill hidden">Auto-detected</span>
+              </div>
+              <select id="carrierSelect" name="carrier">
+                <option value="">Select carrier (auto-detected)...</option>
+              </select>
+            </div>
           </div>
 
           <!-- 2. ORDER DETAILS WITH CERTAINTY METERS -->
@@ -429,23 +439,63 @@
         hidden
       >
         <div class="card stack">
-          <search>
-            <div class="search-bar">
-              <input
-                type="search"
-                id="historySearchInput"
-                aria-label="Search dispatch history"
-                placeholder="Search customer, tracking number, product, or staff..."
-                autocorrect="off"
-                autocapitalize="none"
-                spellcheck="false"
-                enterkeyhint="search"
-              />
-              <button type="button" id="syncHistoryBtn" class="btn btn-brand btn-sm">Sync Sheet</button>
-              <a href="/api/dispatches/export.csv" class="btn btn-outline btn-sm">Export CSV</a>
-            </div>
-          </search>
+          <div class="history-top-controls">
+            <search class="history-search-wrap">
+              <div class="search-bar">
+                <input
+                  type="search"
+                  id="historySearchInput"
+                  aria-label="Search dispatch history"
+                  placeholder="Search..."
+                  autocorrect="off"
+                  autocapitalize="none"
+                  spellcheck="false"
+                  enterkeyhint="search"
+                />
+                <button type="button" id="syncHistoryBtn" class="btn btn-brand btn-sm">Sync Sheet</button>
+                <a href="/api/dispatches/export.csv" class="btn btn-outline btn-sm">Export CSV</a>
+              </div>
+            </search>
+            <button type="button" id="openCourierCountsBtn" class="btn btn-courier-counts btn-sm">
+              <svg class="icon" width="15" height="15" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="1" y="3" width="15" height="13" rx="1"/>
+                <polygon points="16 8 20 8 23 11 23 16 16 16 16 8"/>
+                <circle cx="5.5" cy="18.5" r="2.5"/>
+                <circle cx="18.5" cy="18.5" r="2.5"/>
+              </svg>
+              Courier Counts
+            </button>
+          </div>
+
+          <div class="history-filters" aria-label="Filter dispatch history">
+            <select id="historyCarrierFilter" aria-label="Filter by courier">
+              <option value="">All Couriers</option>
+            </select>
+            <select id="historyProductFilter" aria-label="Filter by product">
+              <option value="">All Products</option>
+            </select>
+            <input type="date" id="historyDateFilter" aria-label="Filter by order date" />
+            <select id="historyStaffFilter" aria-label="Filter by staff">
+              <option value="">All Staff</option>
+            </select>
+            <button type="button" id="clearHistoryFiltersBtn" class="btn btn-subtle btn-xs hidden">Clear Filters</button>
+          </div>
+
+          <div class="history-toolbar-meta">
+            <span id="historyResultsSummary" class="card-sub"></span>
+            <label class="history-per-page">
+              <span>Per page:</span>
+              <select id="historyPageSizeSelect" aria-label="Orders per page">
+                <option value="10">10</option>
+                <option value="20" selected>20</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+          </div>
+
           <div id="dispatchesListContainer" class="history-list"></div>
+          <div id="historyPaginationBar" class="history-pagination hidden" aria-label="History pages"></div>
         </div>
       </section>
 
@@ -705,7 +755,33 @@
 
         <hr class="hairline" />
 
-        <!-- 4. Local Image Storage & Auto-Cleanup -->
+        <!-- 4. Carriers & Daily Parcel Counter -->
+        <div class="admin-block">
+          <h3 class="admin-block-title">Carriers &amp; Daily Counter</h3>
+          <p class="card-sub">Edit selectable couriers for tracking slips and set the daily count reset time (AEST).</p>
+
+          <div id="adminCarriersList" class="admin-carriers-list block-gap-xs"></div>
+
+          <div class="row-between block-gap-xs">
+            <input
+              type="text"
+              id="newCarrierInput"
+              placeholder="Add carrier name (e.g. Border Express)"
+              autocomplete="off"
+              class="flex-1"
+            />
+            <button type="button" id="addCarrierBtn" class="btn btn-outline btn-sm">+ Add</button>
+          </div>
+
+          <div class="field-group block-gap-sm">
+            <label for="courierResetTimeInput">Daily Courier Count Reset Time (AEST)</label>
+            <input type="time" id="courierResetTimeInput" value="20:00" />
+          </div>
+        </div>
+
+        <hr class="hairline" />
+
+        <!-- 5. Local Image Storage & Auto-Cleanup -->
         <div class="admin-block">
           <div class="row-between row-tight">
             <h3 class="admin-block-title">Local Image Storage</h3>
@@ -872,6 +948,28 @@
       <div class="modal-footer">
         <button type="button" class="btn btn-outline btn-sm" data-close-modal="confirmPurgeLocalImagesModal" autofocus>Cancel</button>
         <button type="button" id="confirmPurgeLocalImagesBtn" class="btn btn-danger btn-sm">Continue</button>
+      </div>
+    </div>
+  </dialog>
+
+  <!-- ==================================================================== -->
+  <!-- COURIER DAILY COUNTS MODAL (Native <dialog>)                         -->
+  <!-- ==================================================================== -->
+  <dialog id="courierCountsModal" class="native-modal" aria-labelledby="courierCountsTitle" closedby="any">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h2 id="courierCountsTitle">Daily Parcels by Courier</h2>
+        <button type="button" class="modal-close" data-close-modal="courierCountsModal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body stack">
+        <p id="courierCountsWindowNote" class="card-sub"></p>
+        <div id="courierCountsBody" class="courier-counts-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" id="refreshCourierCountsBtn" class="btn btn-outline btn-sm">Refresh</button>
+        <button type="button" class="btn btn-brand btn-sm" data-close-modal="courierCountsModal" autofocus>Done</button>
       </div>
     </div>
   </dialog>

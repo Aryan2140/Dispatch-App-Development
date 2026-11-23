@@ -31,7 +31,9 @@
       googleConnected: false,
       googleSheetUrl: '',
       ocrMode: 'auto',
-      hasGeminiApiKey: false
+      hasGeminiApiKey: false,
+      carriers: [],
+      courierResetTime: '20:00'
     },
     networkInfo: null,
     productsCatalog: [],
@@ -39,6 +41,10 @@
     editingQuickSlots: false,
     activeQuickSlotIndex: 0,
     dispatches: [],
+    historyPage: 1,
+    historyPageSize: 20,
+    carrierManuallySelected: false,
+    adminCarriers: [],
     editingDispatchId: null,
     trackingSlipBase64: null,
     trackingSlipReplaced: false,
@@ -78,6 +84,8 @@
       'ocrProgressBar',
       'ocrLowCertaintyNotice',
       'trackingSlipEmptyState',
+      'carrierSelect',
+      'carrierAutoBadge',
       'orderNumberInput',
       'customerNameInput',
       'trackingNumberInput',
@@ -105,7 +113,20 @@
       'submitDispatchBtn',
       'historySearchInput',
       'syncHistoryBtn',
+      'openCourierCountsBtn',
+      'historyCarrierFilter',
+      'historyProductFilter',
+      'historyDateFilter',
+      'historyStaffFilter',
+      'clearHistoryFiltersBtn',
+      'historyResultsSummary',
+      'historyPageSizeSelect',
       'dispatchesListContainer',
+      'historyPaginationBar',
+      'courierCountsModal',
+      'courierCountsWindowNote',
+      'courierCountsBody',
+      'refreshCourierCountsBtn',
       'confirmDeleteModal',
       'confirmDeleteMsg',
       'confirmDeleteBtn',
@@ -146,6 +167,10 @@
       'settingsGeminiApiKey',
       'testGeminiBtn',
       'geminiStatusNote',
+      'adminCarriersList',
+      'newCarrierInput',
+      'addCarrierBtn',
+      'courierResetTimeInput',
       'localCleanupEnabledInput',
       'localCleanupDaysInput',
       'localCleanupTimeInput',
@@ -566,10 +591,55 @@
     });
     els.cancelEditDispatchBtn?.addEventListener('click', () => resetDispatchForm(true));
 
-    // Search History & Sync
-    els.historySearchInput.addEventListener('input', debounce(() => loadDispatches(false), 180));
+    // Carrier selection & Tracking-to-Carrier fallback auto-detect
+    els.carrierSelect?.addEventListener('change', () => {
+      state.carrierManuallySelected = Boolean(els.carrierSelect.value);
+      els.carrierAutoBadge?.classList.add('hidden');
+    });
+    const onTrackingInputAutoCarrier = () => {
+      if (state.carrierManuallySelected) return;
+      autoSetCarrierFromTracking(els.trackingNumberInput?.value || '');
+    };
+    els.trackingNumberInput?.addEventListener('input', onTrackingInputAutoCarrier);
+    els.trackingNumberInput?.addEventListener('blur', onTrackingInputAutoCarrier);
+
+    // Search History, Filters, Pagination, Courier Counts & Sync
+    const onHistoryFilterChange = () => {
+      state.historyPage = 1;
+      renderDispatchesList();
+    };
+    els.historySearchInput.addEventListener('input', debounce(onHistoryFilterChange, 120));
+    els.historyCarrierFilter?.addEventListener('change', onHistoryFilterChange);
+    els.historyProductFilter?.addEventListener('change', onHistoryFilterChange);
+    els.historyDateFilter?.addEventListener('change', onHistoryFilterChange);
+    els.historyStaffFilter?.addEventListener('change', onHistoryFilterChange);
+    els.clearHistoryFiltersBtn?.addEventListener('click', () => {
+      if (els.historySearchInput) els.historySearchInput.value = '';
+      if (els.historyCarrierFilter) els.historyCarrierFilter.value = '';
+      if (els.historyProductFilter) els.historyProductFilter.value = '';
+      if (els.historyDateFilter) els.historyDateFilter.value = '';
+      if (els.historyStaffFilter) els.historyStaffFilter.value = '';
+      state.historyPage = 1;
+      renderDispatchesList();
+    });
+    els.historyPageSizeSelect?.addEventListener('change', () => {
+      state.historyPageSize = Math.max(1, parseInt(els.historyPageSizeSelect.value, 10) || 20);
+      state.historyPage = 1;
+      renderDispatchesList();
+    });
+    els.openCourierCountsBtn?.addEventListener('click', openCourierCountsModal);
+    els.refreshCourierCountsBtn?.addEventListener('click', loadCourierCounts);
     els.syncHistoryBtn.addEventListener('click', () => loadDispatches(true));
     els.confirmDeleteBtn.addEventListener('click', handleConfirmDeleteDispatch);
+
+    // Admin Settings Carriers
+    els.addCarrierBtn?.addEventListener('click', handleAddAdminCarrier);
+    els.newCarrierInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        handleAddAdminCarrier();
+      }
+    });
 
     // Admin Login & Settings Actions
     els.adminLoginForm.addEventListener('submit', handleAdminLogin);
@@ -596,10 +666,67 @@
       ]);
       if (cfgRes.success && cfgRes.config) state.config = cfgRes.config;
       if (netRes.success) state.networkInfo = netRes;
+      populateCarrierSelect();
+      populateHistoryFilterOptions();
       updateHeaderIndicators();
     } catch (err) {
       console.error('Failed to load config:', err);
     }
+  }
+
+  function getConfiguredCarriers() {
+    if (Array.isArray(state.config?.carriers) && state.config.carriers.length > 0) {
+      return state.config.carriers;
+    }
+    if (window.AimexLabelParser?.DEFAULT_CARRIERS) {
+      return window.AimexLabelParser.DEFAULT_CARRIERS;
+    }
+    return ['Australia Post', 'CouriersPlease', 'StarTrack', 'Aramex', 'Sendle', 'Team Global Express', 'TNT / FedEx', 'DHL', 'Direct Freight', 'Allied Express', 'Other'];
+  }
+
+  function populateCarrierSelect() {
+    if (!els.carrierSelect) return;
+    const prevVal = els.carrierSelect.value;
+    const carriers = getConfiguredCarriers();
+    els.carrierSelect.innerHTML = `<option value="">Select carrier (auto-detected)...</option>` +
+      carriers.map((c) => `<option value="${escapeHtml(c)}">${escapeHtml(c)}</option>`).join('');
+    if (prevVal && carriers.includes(prevVal)) {
+      els.carrierSelect.value = prevVal;
+    }
+  }
+
+  function resolveDispatchCarrier(carrierVal, trackingNumber) {
+    const parser = window.AimexLabelParser;
+    const list = getConfiguredCarriers();
+    if (parser?.normalizeCarrierName && carrierVal) {
+      const norm = parser.normalizeCarrierName(carrierVal, list);
+      if (norm) return norm;
+    }
+    if (carrierVal) return carrierVal;
+    if (parser?.detectCarrierFromTracking && trackingNumber) {
+      return parser.detectCarrierFromTracking(trackingNumber, list) || '';
+    }
+    return '';
+  }
+
+  function autoSetCarrierFromTracking(trackingNumber, preferredCarrier = '') {
+    if (!els.carrierSelect) return;
+    const resolved = resolveDispatchCarrier(preferredCarrier, trackingNumber);
+    if (!resolved) return;
+
+    const existingOpt = Array.from(els.carrierSelect.options).find(
+      (opt) => opt.value.toLowerCase() === resolved.toLowerCase()
+    );
+    if (existingOpt) {
+      els.carrierSelect.value = existingOpt.value;
+    } else {
+      const opt = document.createElement('option');
+      opt.value = resolved;
+      opt.textContent = resolved;
+      els.carrierSelect.appendChild(opt);
+      els.carrierSelect.value = resolved;
+    }
+    els.carrierAutoBadge?.classList.remove('hidden');
   }
 
   function updateHeaderIndicators() {
@@ -1033,7 +1160,8 @@
             extracted = {
               ...extracted,
               trackingNumber: sEx.trackingNumber,
-              trackingNumberCertainty: Math.max(85, Number(sEx.trackingNumberCertainty) || 85)
+              trackingNumberCertainty: Math.max(85, Number(sEx.trackingNumberCertainty) || 85),
+              carrier: extracted.carrier || sEx.carrier || ''
             };
           }
         }
@@ -1081,6 +1209,7 @@
             customerNameCertainty: pickName2 ? ex2.customerNameCertainty : extracted.customerNameCertainty,
             trackingNumber: pickTrack2 ? ex2.trackingNumber : extracted.trackingNumber,
             trackingNumberCertainty: pickTrack2 ? ex2.trackingNumberCertainty : extracted.trackingNumberCertainty,
+            carrier: extracted.carrier || ex2.carrier || '',
             orderDate: extracted.orderDate || ex2.orderDate
           };
           if (pickName2 || pickTrack2) {
@@ -1157,6 +1286,10 @@
         setTimeout(() => el.classList.remove('field-autofilled'), 2400);
       }
     });
+
+    if (!state.carrierManuallySelected) {
+      autoSetCarrierFromTracking(extracted.trackingNumber || '', extracted.carrier || '');
+    }
   }
 
   // ==========================================================================
@@ -1735,6 +1868,7 @@
     const orderNumber = els.orderNumberInput.value.trim();
     const customerName = els.customerNameInput.value.trim();
     const trackingNumber = els.trackingNumberInput.value.trim();
+    const carrier = (els.carrierSelect?.value || '').trim() || resolveDispatchCarrier('', trackingNumber);
     const orderDate = els.orderDateInput.value || getTodayIsoDate();
     const products = collectPackedProducts();
 
@@ -1792,6 +1926,7 @@
         orderNumber,
         customerName,
         trackingNumber,
+        carrier,
         orderDate,
         staffName: state.staffName,
         products,
@@ -1823,6 +1958,7 @@
             orderNumber: d.orderNumber || '',
             orderDate: d.orderDate,
             trackingNumber: d.trackingNumber,
+            carrier: d.carrier || carrier || '',
             customerName: d.customerName,
             staffName: d.staffName,
             products: d.products,
@@ -1880,12 +2016,15 @@
     state.editingDispatchId = null;
     state.trackingSlipReplaced = false;
     state.trackingSlipRemoved = false;
+    state.carrierManuallySelected = false;
     if (els.editingModeBanner) els.editingModeBanner.classList.add('hidden');
     if (els.submitDispatchBtn) els.submitDispatchBtn.textContent = 'Save Dispatch';
     if (els.resetFormBtn) els.resetFormBtn.textContent = 'Clear';
 
     clearTrackingSlip();
     els.dispatchForm?.reset();
+    if (els.carrierSelect) els.carrierSelect.value = '';
+    els.carrierAutoBadge?.classList.add('hidden');
     els.orderNumberInput.value = '';
     els.customerNameInput.value = '';
     els.trackingNumberInput.value = '';
@@ -2029,12 +2168,11 @@
       els.syncHistoryBtn.textContent = 'Syncing...';
     }
     try {
-      const q = els.historySearchInput.value.trim();
       const params = new URLSearchParams();
-      if (q) params.set('q', q);
       if (syncWithGoogle) params.set('sync', 'true');
 
-      const res = await fetch(`/api/dispatches?${params.toString()}`).then((r) => r.json());
+      const queryStr = params.toString();
+      const res = await fetch(`/api/dispatches${queryStr ? '?' + queryStr : ''}`).then((r) => r.json());
       if (!res.success) return;
 
       state.dispatches = res.dispatches || [];
@@ -2052,14 +2190,25 @@
               if (!remote?.dispatchId || seen.has(remote.dispatchId)) continue;
               seen.add(remote.dispatchId);
               const existing = localById.get(remote.dispatchId);
+              const resolvedCarrier = resolveDispatchCarrier(
+                remote.carrier || existing?.carrier || '',
+                remote.trackingNumber || existing?.trackingNumber || ''
+              );
               merged.push(
                 existing
-                  ? { ...existing, syncStatus: 'synced', driveFolderUrl: remote.driveFolderUrl || existing.driveFolderUrl || '' }
+                  ? {
+                      ...existing,
+                      carrier: existing.carrier || resolvedCarrier,
+                      syncStatus: 'synced',
+                      driveFolderUrl: remote.driveFolderUrl || existing.driveFolderUrl || ''
+                    }
                   : {
                       dispatchId: remote.dispatchId,
+                      orderNumber: remote.orderNumber || '',
                       timestamp: remote.timestamp || '',
                       orderDate: remote.orderDate || '',
                       trackingNumber: remote.trackingNumber || '',
+                      carrier: resolvedCarrier,
                       customerName: remote.customerName || '',
                       staffName: remote.staffName || '',
                       products: Array.isArray(remote.products) ? remote.products : [],
@@ -2079,6 +2228,7 @@
       }
 
       if (els.historyCountBadge) els.historyCountBadge.textContent = String(res.total ?? state.dispatches.length);
+      populateHistoryFilterOptions();
       renderDispatchesList();
     } catch (err) {
       console.error('Failed to load dispatches:', err);
@@ -2090,19 +2240,189 @@
     }
   }
 
-  function renderDispatchesList() {
-    const list = state.dispatches;
-    if (list.length === 0) {
-      els.dispatchesListContainer.innerHTML = `<div class="empty-box">No dispatches logged yet.</div>`;
+  function populateHistoryFilterOptions() {
+    const carrierSet = new Set(getConfiguredCarriers().filter((c) => c && c !== 'Other'));
+    const productSet = new Set();
+    const staffSet = new Set();
+
+    for (const d of state.dispatches) {
+      const resolvedCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
+      if (resolvedCarrier) carrierSet.add(resolvedCarrier);
+
+      const staff = (d.staffName || d.staffMember || '').trim();
+      if (staff) staffSet.add(staff);
+
+      if (Array.isArray(d.products)) {
+        for (const p of d.products) {
+          const pname = String(p?.name || '').trim();
+          if (pname) productSet.add(pname);
+        }
+      }
+    }
+
+    const fillSelect = (selectEl, defaultLabel, items) => {
+      if (!selectEl) return;
+      const cur = selectEl.value;
+      const sorted = Array.from(items).sort((a, b) => a.localeCompare(b));
+      selectEl.innerHTML =
+        `<option value="">${escapeHtml(defaultLabel)}</option>` +
+        sorted.map((v) => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`).join('');
+      if (cur && sorted.includes(cur)) selectEl.value = cur;
+    };
+
+    fillSelect(els.historyCarrierFilter, 'All Couriers', carrierSet);
+    fillSelect(els.historyProductFilter, 'All Products', productSet);
+    fillSelect(els.historyStaffFilter, 'All Staff', staffSet);
+  }
+
+  function getFilteredDispatches() {
+    const q = (els.historySearchInput?.value || '').trim().toLowerCase();
+    const carrier = els.historyCarrierFilter?.value || '';
+    const product = els.historyProductFilter?.value || '';
+    const date = els.historyDateFilter?.value || '';
+    const staff = els.historyStaffFilter?.value || '';
+
+    const hasAnyFilter = Boolean(q || carrier || product || date || staff);
+    if (els.clearHistoryFiltersBtn) {
+      els.clearHistoryFiltersBtn.classList.toggle('hidden', !hasAnyFilter);
+    }
+
+    return state.dispatches.filter((d) => {
+      const resolvedCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
+      if (carrier && resolvedCarrier !== carrier) return false;
+
+      if (product) {
+        const hasProd = Array.isArray(d.products) && d.products.some((p) => String(p?.name || '').trim() === product);
+        if (!hasProd) return false;
+      }
+
+      if (date) {
+        const oDate = String(d.orderDate || '').slice(0, 10);
+        const tDate = String(d.timestamp || '').slice(0, 10);
+        if (oDate !== date && tDate !== date) return false;
+      }
+
+      if (staff) {
+        const sName = (d.staffName || d.staffMember || '').trim();
+        if (sName !== staff) return false;
+      }
+
+      if (q) {
+        const productNames = Array.isArray(d.products)
+          ? d.products.map((p) => `${p.sku || ''} ${p.name || ''} ${p.location || ''}`).join(' ')
+          : '';
+        const haystack = [
+          d.dispatchId,
+          d.orderNumber,
+          d.orderDate,
+          d.timestamp,
+          d.trackingNumber || d.connote,
+          resolvedCarrier,
+          d.customerName,
+          d.staffName || d.staffMember,
+          productNames
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase();
+        if (!haystack.includes(q)) return false;
+      }
+
+      return true;
+    });
+  }
+
+  function renderHistoryPagination(totalFiltered, totalPages) {
+    if (!els.historyPaginationBar) return;
+    if (totalFiltered === 0 || totalPages <= 1) {
+      els.historyPaginationBar.classList.add('hidden');
+      els.historyPaginationBar.innerHTML = '';
       return;
     }
 
-    els.dispatchesListContainer.innerHTML = list
+    els.historyPaginationBar.classList.remove('hidden');
+    const cur = state.historyPage;
+    const buttons = [];
+
+    buttons.push(
+      `<button type="button" class="btn btn-xs btn-outline page-btn" data-page="${cur - 1}" ${cur <= 1 ? 'disabled' : ''}>&laquo; Prev</button>`
+    );
+
+    const pageNums = [];
+    for (let p = 1; p <= totalPages; p++) {
+      if (p === 1 || p === totalPages || Math.abs(p - cur) <= 1) {
+        pageNums.push(p);
+      } else if (pageNums[pageNums.length - 1] !== '...') {
+        pageNums.push('...');
+      }
+    }
+
+    for (const item of pageNums) {
+      if (item === '...') {
+        buttons.push(`<span class="card-sub" style="padding-inline:4px;">&hellip;</span>`);
+      } else {
+        const isActive = item === cur;
+        buttons.push(
+          `<button type="button" class="btn btn-xs btn-outline page-btn${isActive ? ' active' : ''}" data-page="${item}" ${isActive ? 'aria-current="page"' : ''}>${item}</button>`
+        );
+      }
+    }
+
+    buttons.push(
+      `<button type="button" class="btn btn-xs btn-outline page-btn" data-page="${cur + 1}" ${cur >= totalPages ? 'disabled' : ''}>Next &raquo;</button>`
+    );
+
+    els.historyPaginationBar.innerHTML = buttons.join('');
+    els.historyPaginationBar.querySelectorAll('[data-page]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const target = parseInt(btn.getAttribute('data-page'), 10);
+        if (!target || target < 1 || target > totalPages || target === state.historyPage) return;
+        state.historyPage = target;
+        renderDispatchesList();
+        els.dispatchesListContainer?.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  }
+
+  function renderDispatchesList() {
+    const filtered = getFilteredDispatches();
+    const total = filtered.length;
+
+    if (total === 0) {
+      if (els.historyResultsSummary) {
+        els.historyResultsSummary.textContent = state.dispatches.length === 0 ? '0 orders' : '0 matching orders';
+      }
+      els.dispatchesListContainer.innerHTML = `<div class="empty-box">${
+        state.dispatches.length === 0 ? 'No dispatches logged yet.' : 'No dispatches match the current search or filters.'
+      }</div>`;
+      renderHistoryPagination(0, 1);
+      return;
+    }
+
+    const pageSize = Math.max(1, state.historyPageSize || 20);
+    const totalPages = Math.max(1, Math.ceil(total / pageSize));
+    if (state.historyPage > totalPages) state.historyPage = totalPages;
+    if (state.historyPage < 1) state.historyPage = 1;
+
+    const startIdx = (state.historyPage - 1) * pageSize;
+    const endIdx = Math.min(total, startIdx + pageSize);
+    const pageList = filtered.slice(startIdx, endIdx);
+
+    if (els.historyResultsSummary) {
+      els.historyResultsSummary.textContent = `Showing ${startIdx + 1}–${endIdx} of ${total} order${total === 1 ? '' : 's'}`;
+    }
+
+    els.dispatchesListContainer.innerHTML = pageList
       .map((d) => {
         const isSynced = d.syncStatus === 'synced';
         const syncPill = isSynced
           ? `<span class="sync-pill ok">Synced</span>`
           : `<span class="sync-pill pending">Local</span>`;
+
+        const resolvedCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
+        const carrierPill = resolvedCarrier
+          ? `<span class="carrier-pill">${escapeHtml(resolvedCarrier)}</span>`
+          : '';
 
         const productsText = Array.isArray(d.products)
           ? d.products
@@ -2140,24 +2460,37 @@
         const editBtn = `<button type="button" class="btn btn-xs btn-outline" data-edit-id="${escapeHtml(d.dispatchId)}">Edit</button>`;
         const deleteBtn = `<button type="button" class="btn btn-xs btn-outline" data-delete-id="${escapeHtml(d.dispatchId)}" data-delete-label="${escapeHtml(d.customerName || d.trackingNumber || d.dispatchId)}">Remove</button>`;
 
+        const thumbsHtml = thumbs.length > 0 ? `<div class="history-thumbs">${thumbs.join('')}</div>` : '';
+        const actionsHtml = `<div class="history-actions">${driveLink}${retryBtn}${editBtn}${deleteBtn}</div>`;
+
         return `
           <div class="history-item">
-            <div class="history-top">
-              <span class="history-customer">${escapeHtml(d.customerName || 'Unknown')}</span>
-              <div class="history-top-meta">
-                <span class="mono history-tracking">${escapeHtml(d.trackingNumber || d.connote || '')}</span>
+            <div class="history-header">
+              <div class="history-name-row">
+                <span class="history-customer">${escapeHtml(d.customerName || 'Unknown')}</span>
                 ${syncPill}
+              </div>
+              <div class="history-tracking-row">
+                <span class="mono history-tracking">${escapeHtml(d.trackingNumber || d.connote || '')}</span>
+                ${carrierPill}
               </div>
             </div>
             <div class="history-meta">
-              <div>${d.orderNumber ? `<strong>Order #:</strong> <span class="mono">${escapeHtml(d.orderNumber)}</span> &middot; ` : ''}<strong>Order Date:</strong> ${escapeHtml(d.orderDate || '-')} &middot; <strong>Staff:</strong> ${escapeHtml(d.staffName || d.staffMember || '-')}</div>
-              <div><strong>Items (${d.totalQty || 0}):</strong> ${productsText || '-'}</div>
+              ${d.orderNumber ? `<div class="history-meta-line"><strong>Order #:</strong> <span class="mono">${escapeHtml(d.orderNumber)}</span></div>` : ''}
+              <div class="history-meta-line"><strong>Order Date:</strong> ${escapeHtml(d.orderDate || '-')}</div>
+              <div class="history-meta-line"><strong>Staff:</strong> ${escapeHtml(d.staffName || d.staffMember || '-')}</div>
+              <div class="history-meta-line"><strong>Items (${d.totalQty || 0}):</strong> ${productsText || '-'}</div>
             </div>
-            <div class="history-thumbs">${thumbs.join('')}${driveLink}${retryBtn}${editBtn}${deleteBtn}</div>
+            <div class="history-footer">
+              ${thumbsHtml}
+              ${actionsHtml}
+            </div>
           </div>
         `;
       })
       .join('');
+
+    renderHistoryPagination(total, totalPages);
 
     els.dispatchesListContainer.querySelectorAll('[data-lightbox-src]').forEach((img) => {
       img.addEventListener('click', () => {
@@ -2204,6 +2537,7 @@
                 orderNumber: record.orderNumber || '',
                 orderDate: record.orderDate || '',
                 trackingNumber: record.trackingNumber || record.connote || '',
+                carrier: resolveDispatchCarrier(record.carrier, record.trackingNumber || record.connote || ''),
                 customerName: record.customerName || '',
                 staffName: record.staffName || record.staffMember || '',
                 products: record.products || [],
@@ -2260,6 +2594,19 @@
     els.customerNameInput.value = d.customerName || '';
     els.trackingNumberInput.value = d.trackingNumber || d.connote || '';
     els.orderDateInput.value = d.orderDate || getTodayIsoDate();
+
+    const resolvedEditCarrier = resolveDispatchCarrier(d.carrier, d.trackingNumber || d.connote || '');
+    if (els.carrierSelect) {
+      if (resolvedEditCarrier && !Array.from(els.carrierSelect.options).some((o) => o.value === resolvedEditCarrier)) {
+        const opt = document.createElement('option');
+        opt.value = resolvedEditCarrier;
+        opt.textContent = resolvedEditCarrier;
+        els.carrierSelect.appendChild(opt);
+      }
+      els.carrierSelect.value = resolvedEditCarrier;
+    }
+    state.carrierManuallySelected = Boolean(resolvedEditCarrier);
+    els.carrierAutoBadge?.classList.add('hidden');
 
     els.productRowsContainer.innerHTML = '';
     const prods = Array.isArray(d.products) && d.products.length > 0 ? d.products : [];
@@ -2468,9 +2815,101 @@
       if (els.localCleanupTimeInput) els.localCleanupTimeInput.value = lc.time || '20:00';
       renderLocalCleanupStatus(c.localStorageStats, lc);
 
+      state.adminCarriers = Array.isArray(c.carriers) && c.carriers.length > 0
+        ? c.carriers.slice()
+        : getConfiguredCarriers().slice();
+      renderAdminCarriersList();
+      if (els.courierResetTimeInput) els.courierResetTimeInput.value = c.courierResetTime || '20:00';
+
       return true;
     } catch (err) {
       return false;
+    }
+  }
+
+  function renderAdminCarriersList() {
+    if (!els.adminCarriersList) return;
+    els.adminCarriersList.innerHTML = state.adminCarriers
+      .map(
+        (c, idx) => `
+          <span class="carrier-chip">
+            <span>${escapeHtml(c)}</span>
+            <button type="button" class="carrier-chip-remove" data-remove-carrier-idx="${idx}" aria-label="Remove ${escapeHtml(c)}">&times;</button>
+          </span>
+        `
+      )
+      .join('');
+
+    els.adminCarriersList.querySelectorAll('[data-remove-carrier-idx]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        if (state.adminCarriers.length <= 1) {
+          alert('At least one carrier must remain configured.');
+          return;
+        }
+        const i = parseInt(btn.getAttribute('data-remove-carrier-idx'), 10);
+        if (!Number.isNaN(i)) {
+          state.adminCarriers.splice(i, 1);
+          renderAdminCarriersList();
+        }
+      });
+    });
+  }
+
+  function handleAddAdminCarrier() {
+    const val = (els.newCarrierInput?.value || '').trim();
+    if (!val) return;
+    if (!state.adminCarriers.some((c) => c.toLowerCase() === val.toLowerCase())) {
+      state.adminCarriers.push(val);
+      renderAdminCarriersList();
+    }
+    if (els.newCarrierInput) els.newCarrierInput.value = '';
+  }
+
+  async function openCourierCountsModal() {
+    if (!els.courierCountsModal) return;
+    openModalDialog(els.courierCountsModal);
+    await loadCourierCounts();
+  }
+
+  async function loadCourierCounts() {
+    if (!els.courierCountsBody) return;
+    if (els.courierCountsWindowNote) els.courierCountsWindowNote.textContent = 'Loading today\'s courier counts...';
+    els.courierCountsBody.innerHTML = '';
+
+    try {
+      const res = await fetch('/api/dispatches/courier-counts').then((r) => r.json());
+      if (!res.success) throw new Error(res.error || 'Failed to load counts.');
+
+      if (els.courierCountsWindowNote) {
+        els.courierCountsWindowNote.textContent = `Window: Since ${res.windowStart} AEST (Resets daily at ${res.resetTime} AEST)`;
+      }
+
+      const counts = Array.isArray(res.counts) ? res.counts : [];
+      if (counts.length === 0) {
+        els.courierCountsBody.innerHTML = `<div class="empty-box">0 parcels dispatched since ${escapeHtml(res.windowStart)} AEST.</div>`;
+        return;
+      }
+
+      els.courierCountsBody.innerHTML =
+        counts
+          .map(
+            (item) => `
+              <div class="courier-count-row">
+                <strong>${escapeHtml(item.carrier)}</strong>
+                <span class="courier-count-badge">${item.count}</span>
+              </div>
+            `
+          )
+          .join('') +
+        `
+          <div class="courier-count-total">
+            <span>Total Parcels</span>
+            <span>${res.totalParcels || 0}</span>
+          </div>
+        `;
+    } catch (err) {
+      if (els.courierCountsWindowNote) els.courierCountsWindowNote.textContent = '';
+      els.courierCountsBody.innerHTML = `<div class="result-note result-err">${escapeHtml(err.message)}</div>`;
     }
   }
 
@@ -2485,13 +2924,28 @@
         return;
       }
       const s = res.summary;
+      const byCourier = Array.isArray(s.byCourier) ? s.byCourier : [];
       const rows = Array.isArray(s.entries) && s.entries.length > 0 ? s.entries : s.products || [];
-      if (rows.length === 0) {
+      if (rows.length === 0 && byCourier.length === 0) {
         els.dailySummaryPreviewBox.innerHTML = `<strong>${escapeHtml(s.date)}</strong>: 0 products packaged today.`;
         return;
       }
+      const courierSectionHtml = byCourier.length > 0
+        ? `
+          <div style="margin:6px 0 4px;font-weight:700;font-size:12px;">Parcels Dispatched by Courier</div>
+          <table class="catalog-table" style="margin-bottom:10px;">
+            <thead><tr><th>Courier</th><th style="text-align:right;">Parcels</th></tr></thead>
+            <tbody>
+              ${byCourier
+                .map((c) => `<tr><td>${escapeHtml(c.carrier)}</td><td style="text-align:right;font-weight:700;">${c.parcels}</td></tr>`)
+                .join('')}
+            </tbody>
+          </table>
+        `
+        : '';
       els.dailySummaryPreviewBox.innerHTML = `
         <div style="margin-bottom:6px;"><strong>${escapeHtml(s.date)}</strong> — ${s.totalOrders} orders, ${s.totalUnits} total units</div>
+        ${courierSectionHtml}
         <table class="catalog-table">
           <thead><tr><th>Time</th><th>Product</th><th style="text-align:right;">Qty</th><th>Location</th></tr></thead>
           <tbody>
@@ -2910,6 +3364,9 @@
       time: els.localCleanupTimeInput?.value || '20:00'
     };
 
+    const carriers = state.adminCarriers.length > 0 ? state.adminCarriers.slice() : getConfiguredCarriers();
+    const courierResetTime = els.courierResetTimeInput?.value || '20:00';
+
     try {
       const res = await adminFetch('/api/admin/config', {
         method: 'POST',
@@ -2919,7 +3376,9 @@
           ocrMode,
           geminiApiKey: geminiApiKey === '' ? '__CLEAR__' : geminiApiKey,
           dailyEmail,
-          localCleanup
+          localCleanup,
+          carriers,
+          courierResetTime
         })
       });
 

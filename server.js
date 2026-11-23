@@ -62,6 +62,8 @@ const DEFAULT_CONFIG = {
   ocrMode: 'auto', // 'auto' | 'host' | 'gemini'
   geminiApiKey: '',
   geminiModel: 'auto',
+  carriers: [...labelParser.DEFAULT_CARRIERS],
+  courierResetTime: '20:00',
   adminPasswordHash: hashPassword(DEFAULT_ADMIN_PASSWORD),
   dailyEmail: {
     enabled: true,
@@ -123,6 +125,14 @@ function getConfig() {
   }
   if (!cfg.geminiModel || cfg.geminiModel === 'gemini-2.5-flash') {
     cfg.geminiModel = 'auto';
+    changed = true;
+  }
+  if (!Array.isArray(cfg.carriers) || cfg.carriers.length === 0) {
+    cfg.carriers = [...labelParser.DEFAULT_CARRIERS];
+    changed = true;
+  }
+  if (!/^\d{2}:\d{2}$/.test(cfg.courierResetTime || '')) {
+    cfg.courierResetTime = '20:00';
     changed = true;
   }
   if (changed) writeJsonFile(CONFIG_FILE, cfg);
@@ -268,9 +278,11 @@ function getSydneyDateAndTime(dateObj = new Date()) {
 }
 
 function buildDailySummary(dateStr) {
+  const config = getConfig();
   const dispatches = readJsonFile(DISPATCHES_FILE, []);
   const productMap = new Map();
   const staffMap = new Map();
+  const courierMap = new Map();
   const entries = [];
   let totalOrders = 0;
   let totalUnits = 0;
@@ -290,6 +302,15 @@ function buildDailySummary(dateStr) {
     if (loggedDate !== dateStr && orderDate !== dateStr) continue;
 
     totalOrders++;
+    const resolvedCarrier =
+      labelParser.normalizeCarrierName(d.carrier, config.carriers) ||
+      labelParser.detectCarrierFromTracking(d.trackingNumber || d.connote || '', config.carriers) ||
+      'Unspecified';
+    if (!courierMap.has(resolvedCarrier)) {
+      courierMap.set(resolvedCarrier, { carrier: resolvedCarrier, parcels: 0 });
+    }
+    courierMap.get(resolvedCarrier).parcels += 1;
+
     const staff = String(d.staffName || d.staffMember || 'Unknown').trim() || 'Unknown';
     if (!staffMap.has(staff)) {
       staffMap.set(staff, { staffName: staff, orders: 0, units: 0 });
@@ -317,7 +338,8 @@ function buildDailySummary(dateStr) {
         location: location || '-',
         staffName: staff,
         dispatchId: d.dispatchId || '',
-        trackingNumber: d.trackingNumber || d.connote || ''
+        trackingNumber: d.trackingNumber || d.connote || '',
+        carrier: resolvedCarrier
       });
 
       const key = `${sku.toLowerCase()}::${name.toLowerCase()}`;
@@ -342,14 +364,85 @@ function buildDailySummary(dateStr) {
     }))
     .sort((a, b) => b.quantity - a.quantity);
   const byStaff = Array.from(staffMap.values()).sort((a, b) => b.units - a.units);
+  const byCourier = Array.from(courierMap.values()).sort((a, b) => b.parcels - a.parcels);
 
   return {
     date: dateStr,
     totalOrders,
     totalUnits,
+    byCourier,
     entries: cleanEntries,
     products,
     byStaff
+  };
+}
+
+function shiftIsoDate(dateStr, deltaDays) {
+  const [y, m, d] = String(dateStr || '').split('-').map(Number);
+  if (!y || !m || !d) return dateStr;
+  const utc = new Date(Date.UTC(y, m - 1, d + deltaDays));
+  const yy = utc.getUTCFullYear();
+  const mm = String(utc.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(utc.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+function getCourierDayWindow(now = new Date(), resetTimeStr = '20:00') {
+  const resetTime = /^\d{2}:\d{2}$/.test(resetTimeStr || '') ? resetTimeStr : '20:00';
+  const { dateStr, timeStr } = getSydneyDateAndTime(now);
+  if (timeStr >= resetTime) {
+    return {
+      resetTime,
+      windowStart: `${dateStr} ${resetTime}`,
+      windowEnd: `${shiftIsoDate(dateStr, 1)} ${resetTime}`
+    };
+  }
+  return {
+    resetTime,
+    windowStart: `${shiftIsoDate(dateStr, -1)} ${resetTime}`,
+    windowEnd: `${dateStr} ${resetTime}`
+  };
+}
+
+function computeCourierCountsForWindow(dispatches, config, now = new Date()) {
+  const resetTime = config?.courierResetTime || '20:00';
+  const { windowStart, windowEnd } = getCourierDayWindow(now, resetTime);
+  const countsMap = new Map();
+  let totalParcels = 0;
+
+  for (const d of dispatches) {
+    let key = '';
+    if (d.createdAtIso) {
+      const syd = getSydneyDateAndTime(new Date(d.createdAtIso));
+      key = `${syd.dateStr} ${syd.timeStr}`;
+    } else if (d.timestamp) {
+      const tm = String(d.timestamp).match(/^(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+      if (tm) key = `${tm[1]} ${tm[2]}`;
+    } else if (d.orderDate) {
+      key = `${String(d.orderDate).slice(0, 10)} 12:00`;
+    }
+
+    if (!key || key < windowStart || key >= windowEnd) continue;
+
+    const carrier =
+      labelParser.normalizeCarrierName(d.carrier, config.carriers) ||
+      labelParser.detectCarrierFromTracking(d.trackingNumber || d.connote || '', config.carriers) ||
+      'Unspecified';
+
+    countsMap.set(carrier, (countsMap.get(carrier) || 0) + 1);
+    totalParcels += 1;
+  }
+
+  const counts = Array.from(countsMap.entries())
+    .map(([carrier, count]) => ({ carrier, count }))
+    .sort((a, b) => b.count - a.count || a.carrier.localeCompare(b.carrier));
+
+  return {
+    resetTime,
+    windowStart,
+    windowEnd,
+    totalParcels,
+    counts
   };
 }
 
@@ -1208,19 +1301,27 @@ function getGeminiStatus(config) {
   };
 }
 
-async function callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId) {
+async function callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId, configuredCarriers = []) {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  const carrierList = (Array.isArray(configuredCarriers) && configuredCarriers.length > 0
+    ? configuredCarriers
+    : labelParser.DEFAULT_CARRIERS
+  ).join(', ');
 
   const prompt = `Extract AU shipping label JSON for sender Aimex Australia.
 - customerName: recipient ("To:"/"Ship To:"/"Deliver To:") full name or company (once if repeated). Ignore sender (Aimex/Smithfield 2164/Greystanes 2145), weights, phone, satchel text.
 - trackingNumber: primary tracking/connote/article ID only (no prefix):
   * AusPost MyPost Business: read VERTICALLY rotated (top-to-bottom) text beside the right vertical barcode ("AP Article Id: 997...", always 23 pure digits, no letters).
   * AusPost eParcel: full "AP Article Id" (e.g. 39BCX500052901000931505) over short Con No.
-  * CouriersPlease: top "Connote:" (e.g. CPCTOZE0000179) or standalone CP... barcode (e.g. CPBHZST1575833).
+  * CouriersPlease: top "Connote:" (e.g. CPCTOZE0000179) or standalone CP... barcode (e.g. CPBHZST1575833, CPCTOZS0000330).
   * Other carriers: Aramex, StarTrack, Sendle, Toll/TGE, TNT, FedEx, DHL, Direct Freight, Allied.
-  Ignore 8-digit manifest IDs (63512384), 4-digit footers (1123), Ref/Order IDs (503-...), depot codes (D4A270/T4A259), QR text.
+  Ignore 8-digit manifest IDs (63512384), 4-digit footers (1123/1118), Ref/Order IDs (503-...), depot codes (D4A270/T4A259), QR text.
+- carrier: match ONE from [${carrierList}], else "".
+  * Group ALL AusPost labels (Australia Post eParcel, Parcel Post, Express Post, MyPost Business, AP logo, 997.../39BCX... tracking) as "Australia Post".
+  * Group ALL CouriersPlease labels (standard CouriersPlease Connote/CP... or Amazon CouriersPlease map logo/RESIDENTIAL/Pkg 1 of 1/CPBHZST...) as "CouriersPlease".
 - orderDate: YYYY-MM-DD if printed, else "".
-Return JSON: {"customerName":"","trackingNumber":"","orderDate":""}`;
+Return JSON: {"customerName":"","trackingNumber":"","carrier":"","orderDate":""}`;
 
   const payload = JSON.stringify({
     contents: [
@@ -1233,7 +1334,7 @@ Return JSON: {"customerName":"","trackingNumber":"","orderDate":""}`;
     ],
     generationConfig: {
       temperature: 0.1,
-      maxOutputTokens: 160,
+      maxOutputTokens: 200,
       responseMimeType: 'application/json'
     }
   });
@@ -1265,12 +1366,13 @@ Return JSON: {"customerName":"","trackingNumber":"","orderDate":""}`;
   return {
     customerName: String(parsed.customerName || '').trim(),
     trackingNumber: String(parsed.trackingNumber || '').trim(),
+    carrier: String(parsed.carrier || '').trim(),
     orderDate: String(parsed.orderDate || '').trim(),
     modelUsed: modelId
   };
 }
 
-async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'auto') {
+async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'auto', configuredCarriers = []) {
   syncGeminiStateForKey(apiKey);
   const now = Date.now();
   if (geminiRuntimeState.pausedUntil > now) {
@@ -1323,7 +1425,7 @@ async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'au
     const modelId = queue.shift();
     attempts++;
     try {
-      const res = await callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId);
+      const res = await callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId, configuredCarriers);
       geminiRuntimeState.activeModel = modelId;
       geminiRuntimeState.pausedUntil = 0;
       geminiRuntimeState.pauseReason = '';
@@ -1403,10 +1505,15 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
       const gRes = await extractLabelWithGemini(
         options.geminiImageBase64 || imageBase64,
         config.geminiApiKey,
-        config.geminiModel || 'auto'
+        config.geminiModel || 'auto',
+        config.carriers || []
       );
       const trackRaw = String(gRes.trackingNumber || '').trim();
       const suspectMyPost = /^997/i.test(trackRaw) && !/^997\d{20}$/.test(trackRaw);
+      const resolvedCarrier =
+        labelParser.normalizeCarrierName(gRes.carrier, config.carriers) ||
+        labelParser.detectCarrierFromTracking(trackRaw, config.carriers) ||
+        '';
       return {
         engine: `gemini (${gRes.modelUsed})`,
         extracted: {
@@ -1414,6 +1521,7 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
           customerNameCertainty: gRes.customerName ? 96 : 0,
           trackingNumber: trackRaw,
           trackingNumberCertainty: trackRaw ? (suspectMyPost ? 65 : 96) : 0,
+          carrier: resolvedCarrier,
           orderDate: gRes.orderDate
         },
         rawText: '',
@@ -1452,7 +1560,7 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
       if (rawText) engine = 'macos-vision';
     }
 
-    let extracted = rawText ? labelParser.parseTrackingSlipText(rawText, 90) : null;
+    let extracted = rawText ? labelParser.parseTrackingSlipText(rawText, 90, config.carriers) : null;
     const needsFallback =
       !rawText ||
       !extracted.customerName ||
@@ -1463,7 +1571,7 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
     if (needsFallback) {
       const tessRes = await runHostTesseractOnFile(tmpImgPath);
       if (tessRes && tessRes.text) {
-        const tessExtracted = labelParser.parseTrackingSlipText(tessRes.text, tessRes.confidence);
+        const tessExtracted = labelParser.parseTrackingSlipText(tessRes.text, tessRes.confidence, config.carriers);
         if (!extracted) {
           extracted = tessExtracted;
           rawText = tessRes.text;
@@ -1475,16 +1583,22 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
           const pickTessTrack =
             (!extracted.trackingNumber && Boolean(tessExtracted.trackingNumber)) ||
             ((tessExtracted.trackingNumberCertainty || 0) > (extracted.trackingNumberCertainty || 0));
+          const finalTrack = pickTessTrack ? tessExtracted.trackingNumber : extracted.trackingNumber;
 
           extracted = {
             customerName: pickTessName ? tessExtracted.customerName : extracted.customerName,
             customerNameCertainty: pickTessName
               ? tessExtracted.customerNameCertainty
               : extracted.customerNameCertainty,
-            trackingNumber: pickTessTrack ? tessExtracted.trackingNumber : extracted.trackingNumber,
+            trackingNumber: finalTrack,
             trackingNumberCertainty: pickTessTrack
               ? tessExtracted.trackingNumberCertainty
               : extracted.trackingNumberCertainty,
+            carrier:
+              extracted.carrier ||
+              tessExtracted.carrier ||
+              labelParser.detectCarrierFromTracking(finalTrack, config.carriers) ||
+              '',
             orderDate: extracted.orderDate || tessExtracted.orderDate
           };
           engine = `${engine}+tesseract`;
@@ -1499,6 +1613,7 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
         customerNameCertainty: 0,
         trackingNumber: '',
         trackingNumberCertainty: 0,
+        carrier: '',
         orderDate: ''
       },
       rawText: rawText || '',
@@ -1653,7 +1768,9 @@ async function handleRequest(req, res) {
           googleSheetUrl: config.googleSheetUrl || '',
           ocrMode: config.ocrMode || 'auto',
           hasGeminiApiKey: Boolean(config.geminiApiKey),
-          geminiStatus: getGeminiStatus(config)
+          geminiStatus: getGeminiStatus(config),
+          carriers: Array.isArray(config.carriers) && config.carriers.length ? config.carriers : [...labelParser.DEFAULT_CARRIERS],
+          courierResetTime: config.courierResetTime || '20:00'
         }
       });
     }
@@ -1692,6 +1809,8 @@ async function handleRequest(req, res) {
           dailyEmail: config.dailyEmail || DEFAULT_CONFIG.dailyEmail,
           localCleanup: config.localCleanup || DEFAULT_CONFIG.localCleanup,
           localStorageStats: getLocalImageStorageStats(),
+          carriers: Array.isArray(config.carriers) && config.carriers.length ? config.carriers : [...labelParser.DEFAULT_CARRIERS],
+          courierResetTime: config.courierResetTime || '20:00',
           isDefaultPassword: config.adminPasswordHash === hashPassword(DEFAULT_ADMIN_PASSWORD)
         }
       });
@@ -1730,7 +1849,18 @@ async function handleRequest(req, res) {
               ? body.localCleanup.time
               : current.localCleanup?.time || '20:00'
           } : {})
-        }
+        },
+        carriers: Array.isArray(body.carriers)
+          ? (() => {
+              const cleaned = Array.from(
+                new Set(body.carriers.map((c) => String(c || '').trim()).filter(Boolean))
+              );
+              return cleaned.length > 0 ? cleaned : (current.carriers || [...labelParser.DEFAULT_CARRIERS]);
+            })()
+          : (current.carriers || [...labelParser.DEFAULT_CARRIERS]),
+        courierResetTime: /^\d{2}:\d{2}$/.test(body.courierResetTime || '')
+          ? body.courierResetTime
+          : (current.courierResetTime || '20:00')
       };
 
       if (typeof body.geminiApiKey === 'string') {
@@ -1759,7 +1889,9 @@ async function handleRequest(req, res) {
           ocrMode: updated.ocrMode,
           hasGeminiApiKey: Boolean(updated.geminiApiKey),
           geminiStatus: getGeminiStatus(updated),
-          dailyEmail: updated.dailyEmail
+          dailyEmail: updated.dailyEmail,
+          carriers: updated.carriers,
+          courierResetTime: updated.courierResetTime
         }
       });
     }
@@ -2372,17 +2504,27 @@ function findGitBinary() {
       });
     }
 
-    // 7. Dispatches (GET Search / Sync / POST Create / DELETE / CSV Export / Retry Sync)
+    // 7. Dispatches (GET Search / Sync / POST Create / DELETE / CSV Export / Retry Sync / Courier Counts)
+    if (pathname === '/api/dispatches/courier-counts' && req.method === 'GET') {
+      const config = getConfig();
+      const dispatches = readJsonFile(DISPATCHES_FILE, []);
+      const result = computeCourierCountsForWindow(dispatches, config, new Date());
+      return sendJson(res, 200, {
+        success: true,
+        ...result
+      });
+    }
+
     if (pathname === '/api/dispatches' && req.method === 'GET') {
       const q = (parsedUrl.searchParams.get('q') || '').toLowerCase().trim();
       const syncFilter = (parsedUrl.searchParams.get('syncStatus') || '').toLowerCase().trim();
       const shouldSync = parsedUrl.searchParams.get('sync') === 'true';
 
+      const config = getConfig();
       let dispatches = readJsonFile(DISPATCHES_FILE, []);
       let syncedFromGoogle = false;
 
       if (shouldSync) {
-        const config = getConfig();
         if (config.googleScriptUrl) {
           try {
             const targetUrl = `${config.googleScriptUrl}${config.googleScriptUrl.includes('?') ? '&' : '?'}action=search&limit=200`;
@@ -2405,9 +2547,14 @@ function findGitBinary() {
                 if (!remote || !remote.dispatchId || seen.has(remote.dispatchId)) continue;
                 seen.add(remote.dispatchId);
                 const existing = localById.get(remote.dispatchId);
+                const resolvedRemoteCarrier =
+                  labelParser.normalizeCarrierName(remote.carrier, config.carriers) ||
+                  labelParser.detectCarrierFromTracking(remote.trackingNumber || existing?.trackingNumber || '', config.carriers) ||
+                  '';
                 if (existing) {
                   merged.push({
                     ...existing,
+                    carrier: existing.carrier || resolvedRemoteCarrier,
                     syncStatus: 'synced',
                     syncError: null,
                     driveFolderUrl: remote.driveFolderUrl || existing.driveFolderUrl || ''
@@ -2415,10 +2562,12 @@ function findGitBinary() {
                 } else {
                   merged.push({
                     dispatchId: remote.dispatchId,
+                    orderNumber: remote.orderNumber || '',
                     timestamp: remote.timestamp || '',
                     createdAtIso: '',
                     orderDate: remote.orderDate || '',
                     trackingNumber: remote.trackingNumber || '',
+                    carrier: resolvedRemoteCarrier,
                     customerName: remote.customerName || '',
                     staffName: remote.staffName || '',
                     products: Array.isArray(remote.products) ? remote.products : [],
@@ -2442,7 +2591,15 @@ function findGitBinary() {
         }
       }
 
-      const filtered = dispatches.filter((d) => {
+      const enriched = dispatches.map((d) => ({
+        ...d,
+        carrier:
+          labelParser.normalizeCarrierName(d.carrier, config.carriers) ||
+          labelParser.detectCarrierFromTracking(d.trackingNumber || d.connote || '', config.carriers) ||
+          ''
+      }));
+
+      const filtered = enriched.filter((d) => {
         if (syncFilter && (d.syncStatus || '').toLowerCase() !== syncFilter) return false;
         if (!q) return true;
         const productNames = Array.isArray(d.products)
@@ -2454,6 +2611,7 @@ function findGitBinary() {
           d.orderDate,
           d.timestamp,
           d.trackingNumber || d.connote,
+          d.carrier,
           d.customerName,
           d.staffName || d.staffMember,
           productNames
@@ -2467,13 +2625,14 @@ function findGitBinary() {
       return sendJson(res, 200, {
         success: true,
         syncedFromGoogle,
-        total: dispatches.length,
+        total: enriched.length,
         count: filtered.length,
         dispatches: filtered
       });
     }
 
     if (pathname === '/api/dispatches/export.csv' && req.method === 'GET') {
+      const config = getConfig();
       const dispatches = readJsonFile(DISPATCHES_FILE, []);
       const csvHeaders = [
         'Dispatch ID',
@@ -2481,6 +2640,7 @@ function findGitBinary() {
         'Logged Timestamp',
         'Order Date',
         'Tracking Number',
+        'Carrier',
         'Customer Name',
         'Products Packed',
         'Total Qty',
@@ -2501,6 +2661,10 @@ function findGitBinary() {
               .map((p) => `${p.quantity}x ${p.sku ? '[' + p.sku + '] ' : ''}${p.name}${p.location ? ' (Loc: ' + p.location + ')' : ''}`)
               .join('; ')
           : '';
+        const carrierVal =
+          labelParser.normalizeCarrierName(d.carrier, config.carriers) ||
+          labelParser.detectCarrierFromTracking(d.trackingNumber || d.connote || '', config.carriers) ||
+          '';
         rows.push(
           [
             d.dispatchId,
@@ -2508,6 +2672,7 @@ function findGitBinary() {
             d.timestamp,
             d.orderDate || '',
             d.trackingNumber || d.connote || '',
+            carrierVal,
             d.customerName,
             prodSummary,
             d.totalQty || 0,
@@ -2685,6 +2850,10 @@ function findGitBinary() {
 
       const orderNumber = String(body.orderNumber || '').trim();
       const trackingNumber = String(body.trackingNumber || body.connote || '').trim();
+      const carrier =
+        labelParser.normalizeCarrierName(body.carrier, config.carriers) ||
+        labelParser.detectCarrierFromTracking(trackingNumber, config.carriers) ||
+        '';
       const customerName = String(body.customerName || '').trim();
       const orderDate = String(body.orderDate || getSydneyDateAndTime(now).dateStr).trim();
       const staffName = String(body.staffName || body.staffMember || '').trim();
@@ -2696,6 +2865,7 @@ function findGitBinary() {
         createdAtIso: now.toISOString(),
         orderDate,
         trackingNumber,
+        carrier,
         customerName,
         staffName,
         products,
@@ -2718,6 +2888,7 @@ function findGitBinary() {
             orderNumber: record.orderNumber,
             orderDate: record.orderDate,
             trackingNumber: record.trackingNumber,
+            carrier: record.carrier,
             customerName: record.customerName,
             staffName: record.staffName,
             products: record.products,
@@ -2788,6 +2959,11 @@ function findGitBinary() {
       record.orderNumber = body.orderNumber !== undefined ? String(body.orderNumber || '').trim() : record.orderNumber || '';
       record.orderDate = body.orderDate ? String(body.orderDate).trim() : record.orderDate;
       record.trackingNumber = body.trackingNumber !== undefined ? String(body.trackingNumber || '').trim() : record.trackingNumber;
+      const incomingCarrier = body.carrier !== undefined ? String(body.carrier || '').trim() : record.carrier;
+      record.carrier =
+        labelParser.normalizeCarrierName(incomingCarrier, config.carriers) ||
+        labelParser.detectCarrierFromTracking(record.trackingNumber || record.connote || '', config.carriers) ||
+        '';
       record.customerName = body.customerName !== undefined ? String(body.customerName || '').trim() : record.customerName;
       record.staffName = body.staffName !== undefined ? String(body.staffName || '').trim() : record.staffName;
       record.products = products;
@@ -2860,6 +3036,7 @@ function findGitBinary() {
             orderNumber: record.orderNumber,
             orderDate: record.orderDate,
             trackingNumber: record.trackingNumber,
+            carrier: record.carrier,
             customerName: record.customerName,
             staffName: record.staffName,
             products: record.products,
@@ -2977,6 +3154,10 @@ function findGitBinary() {
         orderNumber: record.orderNumber || '',
         orderDate: record.orderDate || '',
         trackingNumber: record.trackingNumber || record.connote || '',
+        carrier:
+          labelParser.normalizeCarrierName(record.carrier, config.carriers) ||
+          labelParser.detectCarrierFromTracking(record.trackingNumber || record.connote || '', config.carriers) ||
+          '',
         customerName: record.customerName || '',
         staffName: record.staffName || record.staffMember || '',
         products: record.products,

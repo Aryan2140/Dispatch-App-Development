@@ -70,7 +70,8 @@ function formatDispatchSheet_(sheet) {
     'Packaging Preview',
     'Drive Folder',
     'Products JSON',
-    'Order Number'
+    'Order Number',
+    'Carrier'
   ];
 
   sheet.getRange(1, 1, 1, headers.length).setValues([headers]);
@@ -87,7 +88,7 @@ function formatDispatchSheet_(sheet) {
   sheet.setRowHeight(1, 36);
   sheet.setFrozenRows(1);
 
-  const widths = [140, 160, 115, 185, 220, 300, 90, 150, 160, 110, 180, 110, 150, 180];
+  const widths = [140, 160, 115, 185, 220, 300, 90, 150, 160, 110, 180, 110, 150, 180, 130, 140];
   widths.forEach((w, idx) => sheet.setColumnWidth(idx + 1, w));
 
   if (!sheet.getFilter()) {
@@ -323,6 +324,7 @@ function doPost(e) {
       const orderNumber = String(body.orderNumber || '').trim();
       const orderDate = (body.orderDate || dateFolderPrefix).trim();
       const trackingNumber = (body.trackingNumber || body.connote || '').trim();
+      const carrier = String(body.carrier || '').trim();
       const customerName = (body.customerName || '').trim();
       const staffName = (body.staffName || body.staffMember || '').trim();
       const products = Array.isArray(body.products) ? body.products : [];
@@ -410,7 +412,8 @@ function doPost(e) {
         '',
         dispatchFolder.getUrl(),
         JSON.stringify(products),
-        orderNumber
+        orderNumber,
+        carrier
       ];
 
       dispatchSheet.getRange(nextRow, 1, 1, rowValues.length).setValues([rowValues]);
@@ -508,6 +511,7 @@ function doPost(e) {
       const orderNumber = String(body.orderNumber || '').trim();
       const orderDate = String(body.orderDate || '').trim();
       const trackingNumber = String(body.trackingNumber || body.connote || '').trim();
+      const carrier = String(body.carrier || '').trim();
       const customerName = String(body.customerName || '').trim();
       const staffName = String(body.staffName || body.staffMember || '').trim();
       const products = Array.isArray(body.products) ? body.products : [];
@@ -530,6 +534,7 @@ function doPost(e) {
       dispatchSheet.getRange(targetRow, 8).setValue(staffName);
       dispatchSheet.getRange(targetRow, 14).setValue(JSON.stringify(products));
       dispatchSheet.getRange(targetRow, 15).setValue(orderNumber);
+      dispatchSheet.getRange(targetRow, 16).setValue(carrier);
 
       // Attach any newly added photos into the dispatch's Drive folder if provided
       let driveFolderUrl = '';
@@ -611,18 +616,34 @@ function doPost(e) {
   }
 }
 
+function detectCarrierFallback_(carrierVal, trackingNumber) {
+  const raw = String(carrierVal || '').trim();
+  if (raw) return raw;
+  const code = String(trackingNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+  if (!code) return 'Unspecified';
+  if (/^CP[A-Z0-9]{6,}$/.test(code)) return 'CouriersPlease';
+  if (/^997\d{15,22}$/.test(code) || /^\d{2}[A-Z]{2,3}\d{7,20}$/.test(code)) return 'Australia Post';
+  if (/^G[ED]\d{9}(?:AU)?$/.test(code)) return 'TNT / FedEx';
+  if (/^[A-Z]{2}\d{9}AU$/.test(code)) return 'Australia Post';
+  if (/^(?:MP|FW|QQ|AZ|NZ|RZ|SZ|PX|CW|SY|ML|BN)\d{10}$/.test(code)) return 'Aramex';
+  if (/^(?:JD01|JJD|GM)\d{10,20}$/.test(code)) return 'DHL';
+  return 'Unspecified';
+}
+
 /**
  * Aggregates all products packaged for a given YYYY-MM-DD date from the Dispatches sheet.
  */
 function aggregateDayFromSheet_(ss, dateStr) {
   const sheet = ss.getSheetByName(CONFIG.DISPATCH_SHEET_NAME);
   if (!sheet || sheet.getLastRow() < 2) {
-    return { date: dateStr, totalOrders: 0, totalUnits: 0, entries: [], products: [], byStaff: [] };
+    return { date: dateStr, totalOrders: 0, totalUnits: 0, byCourier: [], entries: [], products: [], byStaff: [] };
   }
 
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 14).getDisplayValues();
+  const numCols = Math.max(16, sheet.getLastColumn());
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getDisplayValues();
   const productMap = {};
   const staffMap = {};
+  const courierMap = {};
   const entries = [];
   let totalOrders = 0;
   let totalUnits = 0;
@@ -637,6 +658,12 @@ function aggregateDayFromSheet_(ss, dateStr) {
     const loggedTime = timeMatch ? timeMatch[1] : '-';
 
     totalOrders++;
+    const resolvedCarrier = detectCarrierFallback_(r[15], r[3]);
+    if (!courierMap[resolvedCarrier]) {
+      courierMap[resolvedCarrier] = { carrier: resolvedCarrier, parcels: 0 };
+    }
+    courierMap[resolvedCarrier].parcels++;
+
     const staff = String(r[7] || 'Unknown').trim() || 'Unknown';
     if (!staffMap[staff]) staffMap[staff] = { staffName: staff, orders: 0, units: 0 };
     staffMap[staff].orders++;
@@ -682,11 +709,13 @@ function aggregateDayFromSheet_(ss, dateStr) {
     }))
     .sort((a, b) => b.quantity - a.quantity);
   const byStaff = Object.values(staffMap).sort((a, b) => b.units - a.units);
+  const byCourier = Object.values(courierMap).sort((a, b) => b.parcels - a.parcels);
 
   return {
     date: dateStr,
     totalOrders: totalOrders,
     totalUnits: totalUnits,
+    byCourier: byCourier,
     entries: entries,
     products: products,
     byStaff: byStaff
@@ -708,6 +737,7 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
         location: p.location || '-'
       }));
   const byStaff = Array.isArray(summary.byStaff) ? summary.byStaff : [];
+  const byCourier = Array.isArray(summary.byCourier) ? summary.byCourier : [];
   const totalOrders = summary.totalOrders || 0;
   const totalUnits = summary.totalUnits || 0;
 
@@ -717,9 +747,20 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
     `AIMEX AUSTRALIA — DAILY DISPATCH SUMMARY (${dateStr})`,
     `Total Orders: ${totalOrders}`,
     `Total Units Packaged: ${totalUnits}`,
-    '',
-    'PRODUCTS PACKAGED (Time | Product | Quantity | Location):'
+    ''
   ];
+
+  plainLines.push('PARCELS DISPATCHED BY COURIER:');
+  if (byCourier.length === 0) {
+    plainLines.push('  No parcels dispatched today.');
+  } else {
+    byCourier.forEach((c) => {
+      plainLines.push(`  - ${c.carrier || 'Unspecified'}: ${c.parcels} parcel(s)`);
+    });
+  }
+  plainLines.push('');
+
+  plainLines.push('PRODUCTS PACKAGED (Time | Product | Quantity | Location):');
 
   if (entries.length === 0) {
     plainLines.push('  No products packaged today.');
@@ -763,6 +804,15 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
     </tr>
   `).join('');
 
+  const courierRowsHtml = byCourier.length === 0
+    ? '<tr><td colspan="2" style="padding:10px 12px;color:#64748b;text-align:center;">No parcels dispatched today.</td></tr>'
+    : byCourier.map((c) => `
+      <tr>
+        <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0;color:#001e34;font-weight:600;">${escapeHtml_(c.carrier || 'Unspecified')}</td>
+        <td style="padding:7px 12px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;color:#001e34;">${c.parcels}</td>
+      </tr>
+    `).join('');
+
   const htmlBody = `
     <div style="font-family:Arial,sans-serif;max-width:680px;margin:0 auto;border:1px solid #e2e8f0;border-radius:10px;overflow:hidden;">
       <div style="background:#001e34;color:#ffffff;padding:18px 22px;border-bottom:3px solid #fdd400;">
@@ -774,6 +824,17 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
           <strong>Total Orders:</strong> ${totalOrders} &nbsp;|&nbsp;
           <strong>Total Units Packaged:</strong> ${totalUnits}
         </p>
+
+        <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Parcels Dispatched by Courier</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
+          <thead>
+            <tr style="background:#fef9c3;color:#001e34;text-align:left;">
+              <th style="padding:8px 12px;">Courier</th>
+              <th style="padding:8px 12px;text-align:right;">Parcels</th>
+            </tr>
+          </thead>
+          <tbody>${courierRowsHtml}</tbody>
+        </table>
 
         <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Products Packaged</h3>
         <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
@@ -844,7 +905,8 @@ function getProductsList_(ss) {
 function searchDispatches_(ss, query, limit) {
   const sheet = ss.getSheetByName(CONFIG.DISPATCH_SHEET_NAME);
   if (!sheet || sheet.getLastRow() < 2) return [];
-  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, 14).getDisplayValues();
+  const numCols = Math.max(16, sheet.getLastColumn());
+  const values = sheet.getRange(2, 1, sheet.getLastRow() - 1, numCols).getDisplayValues();
   const results = [];
 
   for (let i = values.length - 1; i >= 0; i--) {
@@ -857,6 +919,7 @@ function searchDispatches_(ss, query, limit) {
       results.push({
         dispatchId: r[0],
         orderNumber: r[14] || '',
+        carrier: r[15] || '',
         timestamp: r[1],
         orderDate: r[2],
         trackingNumber: r[3],

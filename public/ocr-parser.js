@@ -24,6 +24,20 @@
 
   const AU_STATES = ['NSW', 'VIC', 'QLD', 'WA', 'SA', 'TAS', 'ACT', 'NT'];
 
+  const DEFAULT_CARRIERS = [
+    'Australia Post',
+    'CouriersPlease',
+    'StarTrack',
+    'Aramex',
+    'Sendle',
+    'Team Global Express',
+    'TNT / FedEx',
+    'DHL',
+    'Direct Freight',
+    'Allied Express',
+    'Other'
+  ];
+
   const SENDER_KEYWORDS = [
     /\ba[i1l]mex\b/i,
     /m[ceoa]?cred[i1l]e/i,
@@ -640,12 +654,145 @@
     return '';
   }
 
+  function getEffectiveCarriers(configuredCarriers) {
+    return Array.isArray(configuredCarriers) && configuredCarriers.length > 0
+      ? configuredCarriers.map((c) => String(c || '').trim()).filter(Boolean)
+      : DEFAULT_CARRIERS;
+  }
+
+  function matchConfiguredCarrier(targetName, configuredCarriers) {
+    const list = getEffectiveCarriers(configuredCarriers);
+    const lowTarget = String(targetName || '').toLowerCase();
+    if (!lowTarget) return '';
+    const exact = list.find((c) => c.toLowerCase() === lowTarget);
+    if (exact) return exact;
+    const partial = list.find(
+      (c) => c.toLowerCase().includes(lowTarget) || lowTarget.includes(c.toLowerCase())
+    );
+    return partial || targetName;
+  }
+
+  function normalizeCarrierName(rawCarrier, configuredCarriers) {
+    const raw = String(rawCarrier || '').trim();
+    if (!raw) return '';
+
+    const canonicalRules = [
+      {
+        canonical: 'Australia Post',
+        re: /\b(?:australia\s*post|aus\s*post|auspost|parcel\s*post|express\s*post|mypost(?:\s*business)?|e\s*parcel|eparcel|ap\s*article)\b|^ap$/i
+      },
+      {
+        canonical: 'CouriersPlease',
+        re: /\b(?:couriers?\s*p[l1i]ease|couriers-please|cowniers)\b|^cp$/i
+      },
+      { canonical: 'StarTrack', re: /\b(?:star\s*track|startrack)\b/i },
+      { canonical: 'Aramex', re: /\b(?:aramex|fastway)\b/i },
+      { canonical: 'Sendle', re: /\bsendle\b/i },
+      { canonical: 'Team Global Express', re: /\b(?:team\s*global(?:\s*express)?|tge|my\s*toll|toll)\b/i },
+      { canonical: 'TNT / FedEx', re: /\b(?:tnt(?:\s*express)?|fedex)\b/i },
+      { canonical: 'DHL', re: /\bdhl(?:\s*express|\s*ecommerce)?\b/i },
+      { canonical: 'Direct Freight', re: /\bdirect\s*freight(?:\s*express)?\b/i },
+      { canonical: 'Allied Express', re: /\ballied(?:\s*express)?\b/i }
+    ];
+
+    for (const rule of canonicalRules) {
+      if (rule.re.test(raw)) {
+        return matchConfiguredCarrier(rule.canonical, configuredCarriers);
+      }
+    }
+
+    const list = getEffectiveCarriers(configuredCarriers);
+    const low = raw.toLowerCase();
+    const exact = list.find((c) => c.toLowerCase() === low);
+    if (exact) return exact;
+    const sub = list.find(
+      (c) => c.toLowerCase() !== 'other' && (low.includes(c.toLowerCase()) || c.toLowerCase().includes(low))
+    );
+    if (sub) return sub;
+
+    return raw;
+  }
+
+  function detectCarrierFromTracking(trackingNumber, configuredCarriers) {
+    const code = String(trackingNumber || '')
+      .toUpperCase()
+      .replace(/[^A-Z0-9]/g, '');
+    if (!code) return '';
+
+    let detected = '';
+    if (/^CP[A-Z0-9]{6,}$/.test(code)) {
+      detected = 'CouriersPlease';
+    } else if (/^997\d{15,22}$/.test(code)) {
+      detected = 'Australia Post';
+    } else if (/^\d{2}[A-Z]{2,3}\d{7,20}$/.test(code)) {
+      detected = 'Australia Post';
+    } else if (/^G[ED]\d{9}(?:AU)?$/.test(code)) {
+      detected = 'TNT / FedEx';
+    } else if (/^[A-Z]{2}\d{9}AU$/.test(code)) {
+      detected = 'Australia Post';
+    } else if (/^(?:MP|FW|QQ|AZ|NZ|RZ|SZ|PX|CW|SY|ML|BN)\d{10}$/.test(code)) {
+      detected = 'Aramex';
+    } else if (/^(?:JD01|JJD|GM)\d{10,20}$/.test(code)) {
+      detected = 'DHL';
+    } else if (/^[A-Z0-9]{3,4}Z\d{8}(?:\d{3})?$/.test(code) || /^\d[A-Z]{2,3}\d{8,11}$/.test(code)) {
+      detected = 'StarTrack';
+    } else if (/^DFE\d{6,}$/.test(code)) {
+      detected = 'Direct Freight';
+    }
+
+    return detected ? normalizeCarrierName(detected, configuredCarriers) : '';
+  }
+
+  function detectCarrierFromTextAndTracking(rawText, trackingNumber, configuredCarriers) {
+    const text = String(rawText || '');
+    const list = getEffectiveCarriers(configuredCarriers);
+
+    // Check canonical brand/service markers in OCR text first
+    const textRules = [
+      {
+        canonical: 'Australia Post',
+        re: /\b(?:australia\s*post|auspost|aus\s*post|parcel\s*post|express\s*post|mypost(?:\s*business)?|eparcel|ap\s*article\s*[i1l]?d)\b/i
+      },
+      {
+        canonical: 'CouriersPlease',
+        re: /\b(?:couriers?\s*p[l1i]ease|couriers-please|cowniers)\b/i
+      },
+      { canonical: 'StarTrack', re: /\b(?:star\s*track|startrack)\b/i },
+      { canonical: 'Aramex', re: /\b(?:aramex|fastway)\b/i },
+      { canonical: 'Sendle', re: /\bsendle\b/i },
+      { canonical: 'Team Global Express', re: /\b(?:team\s*global(?:\s*express)?|my\s*toll|\btoll\b)\b/i },
+      { canonical: 'TNT / FedEx', re: /\b(?:tnt(?:\s*express)?|fedex)\b/i },
+      { canonical: 'DHL', re: /\bdhl(?:\s*express|\s*ecommerce)?\b/i },
+      { canonical: 'Direct Freight', re: /\bdirect\s*freight\b/i },
+      { canonical: 'Allied Express', re: /\ballied\s*express\b/i }
+    ];
+
+    for (const rule of textRules) {
+      if (rule.re.test(text)) {
+        return normalizeCarrierName(rule.canonical, list);
+      }
+    }
+
+    // Check any custom admin-configured carrier names
+    for (const customCarrier of list) {
+      if (!customCarrier || customCarrier.toLowerCase() === 'other') continue;
+      const escaped = customCarrier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp(`\\b${escaped}\\b`, 'i').test(text)) {
+        return customCarrier;
+      }
+    }
+
+    // Fallback to tracking number pattern detection
+    return detectCarrierFromTracking(trackingNumber, list);
+  }
+
   /**
    * Parses raw OCR text and returns extracted fields + 0-100 certainty percentages.
    * @param {string} rawText
    * @param {number} engineConfidence Optional 0-100 OCR engine confidence (e.g. Tesseract data.confidence)
+   * @param {string[]} configuredCarriers Optional list of configured carriers
    */
-  function parseTrackingSlipText(rawText, engineConfidence = 90) {
+  function parseTrackingSlipText(rawText, engineConfidence = 90, configuredCarriers = null) {
     if (!rawText || typeof rawText !== 'string') {
       return {
         customerName: '',
@@ -653,6 +800,7 @@
         trackingNumber: '',
         trackingNumberCertainty: 0,
         orderDate: '',
+        carrier: '',
         rawText: ''
       };
     }
@@ -672,6 +820,7 @@
     const nameRes = extractCustomerName(lines, rowCells);
     const trackRes = extractTrackingNumber(rawText, lines, rowCells);
     const orderDate = extractOrderDate(lines);
+    const carrier = detectCarrierFromTextAndTracking(rawText, trackRes.trackingNumber, configuredCarriers);
 
     const customerNameCertainty = nameRes.customerName
       ? Math.max(15, Math.min(99, Math.round(nameRes.baseCertainty * engFactor)))
@@ -687,16 +836,21 @@
       trackingNumber: trackRes.trackingNumber,
       trackingNumberCertainty,
       orderDate,
+      carrier,
       rawText
     };
   }
 
   return {
+    DEFAULT_CARRIERS,
     parseTrackingSlipText,
     extractCustomerName,
     extractTrackingNumber,
     extractOrderDate,
     normalizeTrackingCode,
-    scoreNameLikeness
+    scoreNameLikeness,
+    normalizeCarrierName,
+    detectCarrierFromTracking,
+    detectCarrierFromTextAndTracking
   };
 });
