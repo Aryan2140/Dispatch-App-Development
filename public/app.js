@@ -2301,7 +2301,13 @@
   // DISPATCH HISTORY
   // ==========================================================================
 
+  let syncingPollTimer = null;
+
   async function loadDispatches(syncWithGoogle = false) {
+    if (syncingPollTimer) {
+      clearTimeout(syncingPollTimer);
+      syncingPollTimer = null;
+    }
     const origSyncText = els.syncHistoryBtn?.textContent || 'Sync Sheet';
     if (syncWithGoogle && els.syncHistoryBtn) {
       els.syncHistoryBtn.disabled = true;
@@ -2324,8 +2330,29 @@
           });
           if (gsRes && gsRes.success && Array.isArray(gsRes.dispatches)) {
             const localById = new Map(state.dispatches.map((d) => [d.dispatchId, d]));
-            const merged = state.dispatches.filter((d) => d.syncStatus !== 'synced');
-            const seen = new Set(merged.map((d) => d.dispatchId));
+            const remoteById = new Map();
+            for (const r of gsRes.dispatches) {
+              if (r && r.dispatchId) remoteById.set(r.dispatchId, r);
+            }
+            const merged = [];
+            const seen = new Set();
+            for (const local of state.dispatches) {
+              if (local.syncStatus !== 'synced') {
+                const remoteMatch = remoteById.get(local.dispatchId);
+                if (remoteMatch) {
+                  merged.push({
+                    ...local,
+                    carrier: local.carrier || resolveDispatchCarrier(remoteMatch.carrier, remoteMatch.trackingNumber || local.trackingNumber),
+                    syncStatus: 'synced',
+                    syncError: null,
+                    driveFolderUrl: remoteMatch.driveFolderUrl || local.driveFolderUrl || ''
+                  });
+                } else {
+                  merged.push(local);
+                }
+                seen.add(local.dispatchId);
+              }
+            }
             for (const remote of gsRes.dispatches) {
               if (!remote?.dispatchId || seen.has(remote.dispatchId)) continue;
               seen.add(remote.dispatchId);
@@ -2370,6 +2397,10 @@
       if (els.historyCountBadge) els.historyCountBadge.textContent = String(res.total ?? state.dispatches.length);
       populateHistoryFilterOptions();
       renderDispatchesList();
+
+      if (state.dispatches.some((d) => d.syncStatus === 'syncing')) {
+        syncingPollTimer = setTimeout(() => loadDispatches(false), 2500);
+      }
     } catch (err) {
       console.error('Failed to load dispatches:', err);
     } finally {

@@ -2589,6 +2589,23 @@ function findGitBinary() {
       let dispatches = readJsonFile(DISPATCHES_FILE, []);
       let syncedFromGoogle = false;
 
+      // Auto-recover any stale 'syncing' records older than 75 seconds so they never stay stuck
+      let staleRecovered = false;
+      const nowMs = Date.now();
+      for (const d of dispatches) {
+        if (d.syncStatus === 'syncing') {
+          const createdMs = d.createdAtIso ? Date.parse(d.createdAtIso) : 0;
+          if (!createdMs || nowMs - createdMs > 75000) {
+            d.syncStatus = 'pending_sync';
+            d.syncError = d.syncError || 'Background sync timed out — tap Sync to retry.';
+            staleRecovered = true;
+          }
+        }
+      }
+      if (staleRecovered) {
+        writeJsonFile(DISPATCHES_FILE, dispatches);
+      }
+
       if (shouldSync) {
         if (config.googleScriptUrl) {
           try {
@@ -2596,13 +2613,32 @@ function findGitBinary() {
             const gsRes = await fetchWithRedirects(targetUrl, { method: 'GET', timeout: 25000 });
             if (gsRes.json && gsRes.json.success && Array.isArray(gsRes.json.dispatches)) {
               const localById = new Map(dispatches.map((d) => [d.dispatchId, d]));
+              const remoteById = new Map();
+              for (const r of gsRes.json.dispatches) {
+                if (r && r.dispatchId) remoteById.set(r.dispatchId, r);
+              }
               const merged = [];
               const seen = new Set();
 
-              // Keep local pending_sync / local_only records at the top
+              // Keep truly unsynced local records at the top, but upgrade any that already reached Google Sheets
               for (const local of dispatches) {
                 if (local.syncStatus !== 'synced') {
-                  merged.push(local);
+                  const remoteMatch = remoteById.get(local.dispatchId);
+                  if (remoteMatch) {
+                    const resolvedRemoteCarrier =
+                      labelParser.normalizeCarrierName(remoteMatch.carrier, config.carriers) ||
+                      labelParser.detectCarrierFromTracking(remoteMatch.trackingNumber || local.trackingNumber || '', config.carriers) ||
+                      '';
+                    merged.push({
+                      ...local,
+                      carrier: local.carrier || resolvedRemoteCarrier,
+                      syncStatus: 'synced',
+                      syncError: null,
+                      driveFolderUrl: remoteMatch.driveFolderUrl || local.driveFolderUrl || ''
+                    });
+                  } else {
+                    merged.push(local);
+                  }
                   seen.add(local.dispatchId);
                 }
               }
@@ -3374,6 +3410,20 @@ server.listen(PORT, HOST, () => {
     });
   }
   console.log('======================================================================\n');
+
+  // Recover any dispatches left in 'syncing' state from a previous server run
+  try {
+    const existing = readJsonFile(DISPATCHES_FILE, []);
+    let changed = false;
+    for (const d of existing) {
+      if (d.syncStatus === 'syncing') {
+        d.syncStatus = 'pending_sync';
+        d.syncError = d.syncError || 'Server restarted before sync finished — tap Sync to retry.';
+        changed = true;
+      }
+    }
+    if (changed) writeJsonFile(DISPATCHES_FILE, existing);
+  } catch (e) {}
 
   if (process.platform === 'win32') {
     ensureWindowsOcrProcess();
