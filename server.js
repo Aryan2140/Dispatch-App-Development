@@ -593,7 +593,21 @@ function runHostTesseractOnFile(imgPath) {
   return task;
 }
 
-const GEMINI_SEED_MODELS = ['gemini-flash-latest', 'gemini-3.8-flash', 'gemini-flash-lite-latest'];
+const GEMINI_SEED_MODELS = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.1-flash-lite',
+  'gemini-flash-lite-latest',
+  'gemini-3.8-flash',
+  'gemini-3.7-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash',
+  'gemini-3-flash-preview',
+  'gemini-flash-latest',
+  'gemini-2.5-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-3.1-pro-preview',
+  'gemini-2.5-pro'
+];
 const GEMINI_MODEL_CACHE_MS = 6 * 60 * 60 * 1000; // 6 hours
 
 const geminiRuntimeState = {
@@ -635,7 +649,11 @@ function rankGeminiModel(modelObj) {
 
   if (!id || !/^gemini-/i.test(id)) return null;
   if (methods.length > 0 && !methods.includes('generateContent')) return null;
-  if (/embedding|aqa|imagen|veo|tts|audio|live|robotics|computer-use|deep-research|\bnano\b/i.test(id)) {
+  if (
+    /embedding|aqa|imagen|veo|tts|audio|live|robotics|computer-use|deep-research|\bnano\b|-image\b|transcribe|customtools|omni|decision|lyria|antigravity|-(?:argon|carbon|hydrogen|neon)\b/i.test(
+      id
+    )
+  ) {
     return null;
   }
 
@@ -650,14 +668,14 @@ function rankGeminiModel(modelObj) {
   const major = verMatch ? Number(verMatch[1]) || 0 : 0;
   const minor = verMatch && verMatch[2] ? Number(verMatch[2]) || 0 : 0;
 
-  // Tier priority (higher is better):
-  // 4 = Standard Flash (rolling latest or newest version)
-  // 3 = Flash-Lite (fast, high free-tier quota fallback bucket)
-  // 2 = Other Flash (thinking, etc.)
-  // 1 = Pro / other general Gemini vision model
+  // Tier priority (higher is better — maximizes free-tier RPD first!):
+  // 4 = Flash-Lite (500 RPD each on free tier: 3.5-flash-lite -> 3.1-flash-lite -> others)
+  // 3 = Standard Flash (3.8-flash -> 3.7-flash -> 3.6-flash -> 3.5-flash -> 3-flash -> 2.5-flash)
+  // 2 = Other Flash
+  // 1 = Pro / other general Gemini vision models
   let tier = 1;
-  if (isFlash && !isLite && !isThinking) tier = 4;
-  else if (isFlash && isLite) tier = 3;
+  if (isFlash && isLite) tier = 4;
+  else if (isFlash && !isLite && !isThinking) tier = 3;
   else if (isFlash) tier = 2;
 
   return {
@@ -675,10 +693,11 @@ function sortRankedGeminiModels(models) {
     .slice()
     .sort((a, b) => {
       if (b.tier !== a.tier) return b.tier - a.tier;
-      if (b.isLatestAlias !== a.isLatestAlias) return b.isLatestAlias - a.isLatestAlias;
+      // Prefer explicit versioned models (e.g. 3.5-flash-lite, 3.1-flash-lite) before generic -latest aliases
       if (b.major !== a.major) return b.major - a.major;
       if (b.minor !== a.minor) return b.minor - a.minor;
       if (b.isStable !== a.isStable) return b.isStable - a.isStable;
+      if (b.isLatestAlias !== a.isLatestAlias) return b.isLatestAlias - a.isLatestAlias;
       return a.id.localeCompare(b.id);
     });
 }
@@ -759,6 +778,13 @@ function isInvalidKeyError(statusCode, message) {
   );
 }
 
+function isTemporarySpikeError(statusCode, message) {
+  return (
+    statusCode === 503 ||
+    /high demand|temporarily unavailable|overloaded|try again later/i.test(String(message || ''))
+  );
+}
+
 function computeQuotaPauseDurationMs(message) {
   const msg = String(message || '');
   // Pure per-minute / short burst rate limit with retry countdown
@@ -817,17 +843,16 @@ function getGeminiStatus(config) {
 async function callGeminiVisionOnce(cleanBase64, mimeType, apiKey, modelId) {
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
 
-  const prompt = `Extract shipping label details for Aimex Australia Pty Ltd.
-IMPORTANT RULES:
-1. "customerName": Extract the RECIPIENT / "Deliver To:" / "Ship To:" / "To:" full name or company name (if repeated twice on two lines, return just one clean name). NEVER extract the sender ("From: Aimex Australia Pty Ltd", "Sender: Aimex Australia", "PO Box 5001 Greystanes NSW 2145", "Smithfield NSW 2164"). Ignore package weights ("4.86 kg."), "Small Satchel", "Pkg 1 of 1", "RESIDENTIAL", or phone numbers.
-2. "trackingNumber": Extract the primary Tracking / Connote / Consignment / AP Article Id number across any carrier:
-   - Australia Post MyPost Business: check for VERTICALLY rotated (reading top-to-bottom) text printed along the right-hand side next to the tall vertical barcode ("AP Article Id: 997...", e.g. "99724133483201008320904" — return only the alphanumeric ID itself, without "AP Article Id:").
-   - Australia Post eParcel: "AP Article Id" (e.g. "39BCX500052901000931505") preferred over short "Con No".
-   - CouriersPlease: Connote (e.g. "CPCTOZE0000179") or standalone "CP..." (e.g. "CPBHZST1575833").
-   - Other carriers: Aramex/Fastway, StarTrack, Sendle, Toll/TGE, TNT, FedEx, DHL, Direct Freight, Allied.
-   Do NOT use 8-digit account/manifest numbers (like "63512384"), 4-digit footers ("1123"), "Ref:" order numbers ("14557"), depot codes ("D4A270", "T4A259"), Amazon "Order Id" ("503-0624319-3869418"), or QR side text.
-3. "orderDate": YYYY-MM-DD if an order or dispatch date is printed on the label, otherwise "".
-Return ONLY a valid JSON object with keys: "customerName", "trackingNumber", "orderDate".`;
+  const prompt = `Extract AU shipping label JSON for sender Aimex Australia.
+- customerName: recipient ("To:"/"Ship To:"/"Deliver To:") full name or company (once if repeated). Ignore sender (Aimex/Smithfield 2164/Greystanes 2145), weights, phone, satchel text.
+- trackingNumber: primary tracking/connote/article ID only (no prefix):
+  * AusPost MyPost Business: read VERTICALLY rotated (top-to-bottom) text beside the right vertical barcode ("AP Article Id: 997...", always 23 pure digits, no letters).
+  * AusPost eParcel: full "AP Article Id" (e.g. 39BCX500052901000931505) over short Con No.
+  * CouriersPlease: top "Connote:" (e.g. CPCTOZE0000179) or standalone CP... barcode (e.g. CPBHZST1575833).
+  * Other carriers: Aramex, StarTrack, Sendle, Toll/TGE, TNT, FedEx, DHL, Direct Freight, Allied.
+  Ignore 8-digit manifest IDs (63512384), 4-digit footers (1123), Ref/Order IDs (503-...), depot codes (D4A270/T4A259), QR text.
+- orderDate: YYYY-MM-DD if printed, else "".
+Return JSON: {"customerName":"","trackingNumber":"","orderDate":""}`;
 
   const payload = JSON.stringify({
     contents: [
@@ -840,6 +865,7 @@ Return ONLY a valid JSON object with keys: "customerName", "trackingNumber", "or
     ],
     generationConfig: {
       temperature: 0.1,
+      maxOutputTokens: 160,
       responseMimeType: 'application/json'
     }
   });
@@ -925,7 +951,7 @@ async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'au
   let didForceRefresh = false;
   let attempts = 0;
 
-  while (queue.length > 0 && attempts < 4) {
+  while (queue.length > 0 && attempts < 16) {
     const modelId = queue.shift();
     attempts++;
     try {
@@ -963,9 +989,16 @@ async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'au
       }
 
       if (isQuotaOrBillingError(status, msg)) {
+        if (geminiRuntimeState.activeModel === modelId) geminiRuntimeState.activeModel = '';
         const waitMs = computeQuotaPauseDurationMs(msg);
         geminiRuntimeState.exhaustedModels.set(modelId, Date.now() + waitMs);
-        continue; // Try backup tier (e.g. flash-lite free bucket)
+        continue; // Seamlessly try next free-tier Gemini model (e.g. 3.5-flash-lite -> 3.1-flash-lite -> 3.8-flash -> ...)
+      }
+
+      if (isTemporarySpikeError(status, msg)) {
+        if (geminiRuntimeState.activeModel === modelId) geminiRuntimeState.activeModel = '';
+        geminiRuntimeState.exhaustedModels.set(modelId, Date.now() + 2 * 60 * 1000);
+        continue; // Skip temporarily overloaded model for 2 minutes
       }
 
       // Transient or parse error — don't burn retries
@@ -978,7 +1011,7 @@ async function extractLabelWithGemini(imageBase64, apiKey, configuredModel = 'au
   if (lastErr && isQuotaOrBillingError(Number(lastErr.statusCode) || 0, lastErr.message)) {
     const waitMs = computeQuotaPauseDurationMs(lastErr.message);
     geminiRuntimeState.pausedUntil = Date.now() + waitMs;
-    geminiRuntimeState.pauseReason = 'Gemini free credits/quota exhausted — reverted to regular Host OCR';
+    geminiRuntimeState.pauseReason = 'All free-tier Gemini models reached quota — reverted to regular Host OCR';
     geminiRuntimeState.lastError = lastErr.message;
   }
 
@@ -1000,17 +1033,19 @@ async function processImageOcrOnHost(imageBase64, config, options = {}) {
   if (useGemini) {
     try {
       const gRes = await extractLabelWithGemini(
-        imageBase64,
+        options.geminiImageBase64 || imageBase64,
         config.geminiApiKey,
         config.geminiModel || 'auto'
       );
+      const trackRaw = String(gRes.trackingNumber || '').trim();
+      const suspectMyPost = /^997/i.test(trackRaw) && !/^997\d{20}$/.test(trackRaw);
       return {
         engine: `gemini (${gRes.modelUsed})`,
         extracted: {
           customerName: gRes.customerName,
           customerNameCertainty: gRes.customerName ? 96 : 0,
-          trackingNumber: gRes.trackingNumber,
-          trackingNumberCertainty: gRes.trackingNumber ? 96 : 0,
+          trackingNumber: trackRaw,
+          trackingNumberCertainty: trackRaw ? (suspectMyPost ? 65 : 96) : 0,
           orderDate: gRes.orderDate
         },
         rawText: '',
@@ -1379,7 +1414,7 @@ async function handleRequest(req, res) {
 
         let pickedModel = '';
         let lastErr = null;
-        for (const modelId of ranked.slice(0, 4)) {
+        for (const modelId of ranked.slice(0, 8)) {
           try {
             const pingEndpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(modelId)}:generateContent?key=${encodeURIComponent(apiKey)}`;
             const pingBody = JSON.stringify({
@@ -1747,7 +1782,8 @@ function findGitBinary() {
       }
       const config = getConfig();
       const result = await processImageOcrOnHost(body.imageBase64, config, {
-        skipGemini: Boolean(body.skipGemini)
+        skipGemini: Boolean(body.skipGemini),
+        geminiImageBase64: body.geminiImageBase64 || null
       });
       return sendJson(res, 200, {
         success: true,

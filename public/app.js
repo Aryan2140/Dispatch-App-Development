@@ -12,6 +12,7 @@
   const STAFF_STORAGE_KEY = 'aimex_staff_name';
 
   const SLIP_IMAGE_SPEC = { maxDim: 1800, quality: 0.85 };
+  const GEMINI_IMAGE_SPEC = { maxDim: 1024, quality: 0.78 };
   const PACKAGING_IMAGE_SPEC = { maxDim: 960, quality: 0.68 };
 
   const DEFAULT_QUICK_ACCESS = [
@@ -804,6 +805,38 @@
   }
 
   /**
+   * Produces a compact, sharp 1024px JPEG specifically for Gemini Vision OCR
+   * to keep Tokens-Per-Minute (TPM) ~65-75% lower while keeping small label text crisp.
+   */
+  function resizeDataUrlForGemini(dataUrl, maxDim = GEMINI_IMAGE_SPEC.maxDim, quality = GEMINI_IMAGE_SPEC.quality) {
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let w = img.width;
+        let h = img.height;
+        const longest = Math.max(w, h);
+        if (longest <= maxDim) {
+          resolve(dataUrl);
+          return;
+        }
+        const scale = maxDim / longest;
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', quality));
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  /**
    * Crops the right-hand vertical barcode strip and rotates it 90 degrees CCW so
    * top-to-bottom text (e.g. MyPost Business "AP Article Id: 997...") is horizontal upright.
    */
@@ -936,11 +969,17 @@
     els.ocrProgressBar.removeAttribute('value');
 
     try {
-      // Pass 1: Send crisp, unmodified image first (preserves barcode & dark ink edges)
+      // Pass 1: Send crisp unmodified image for host fallback + compact 1024px image for Gemini TPM savings
+      const geminiSlipDataUrl = willUseGemini
+        ? await resizeDataUrlForGemini(standardizedSlipDataUrl)
+        : null;
       const res = await fetch('/api/ocr', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageBase64: standardizedSlipDataUrl })
+        body: JSON.stringify({
+          imageBase64: standardizedSlipDataUrl,
+          geminiImageBase64: geminiSlipDataUrl
+        })
       }).then((r) => r.json());
 
       if (!res.success) {
@@ -2784,22 +2823,39 @@
     els.wifiUrlsList.querySelectorAll('.wifi-copy-btn').forEach((btn) => {
       btn.addEventListener('click', async () => {
         const urlToCopy = btn.getAttribute('data-url') || '';
-        try {
-          await navigator.clipboard.writeText(urlToCopy);
-        } catch (e) {
+        let copied = false;
+        if (navigator.clipboard && window.isSecureContext) {
+          try {
+            await navigator.clipboard.writeText(urlToCopy);
+            copied = true;
+          } catch (e) {}
+        }
+        if (!copied) {
+          const host = els.wifiModal?.open ? els.wifiModal : document.body;
           const ta = document.createElement('textarea');
           ta.value = urlToCopy;
-          document.body.appendChild(ta);
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed';
+          ta.style.top = '0';
+          ta.style.left = '-9999px';
+          ta.style.opacity = '0';
+          host.appendChild(ta);
+          ta.focus();
           ta.select();
-          document.execCommand('copy');
+          ta.setSelectionRange(0, urlToCopy.length);
+          try {
+            copied = document.execCommand('copy');
+          } catch (e2) {}
           ta.remove();
         }
-        btn.classList.add('copied');
-        btn.innerHTML = checkSvg;
-        setTimeout(() => {
-          btn.classList.remove('copied');
-          btn.innerHTML = copySvg;
-        }, 1600);
+        if (copied) {
+          btn.classList.add('copied');
+          btn.innerHTML = checkSvg;
+          setTimeout(() => {
+            btn.classList.remove('copied');
+            btn.innerHTML = copySvg;
+          }, 1600);
+        }
       });
     });
   }
