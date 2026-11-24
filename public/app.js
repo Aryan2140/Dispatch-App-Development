@@ -2089,8 +2089,14 @@
       state.packagingItems.some((it) => it.status === 'uploading');
 
     if (!isEditing && hadPendingImages) {
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-      showBanner('success', `Saving ${trackingNumber} for ${customerName} — images will be processed and synced to Google Sheets.`);
+      showBanner(
+        'success',
+        `Saving ${trackingNumber} for ${customerName} — images will be processed and synced to Google Sheets.`,
+        { dismissOnScroll: false }
+      );
+      scrollToPageTop();
+      // Let mobile browsers paint the banner and initiate scroll before serializing large image payloads
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     }
 
     try {
@@ -2128,7 +2134,9 @@
       }
 
       const d = res.dispatch;
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      // Reset the form FIRST so DOM height collapse finishes before scrolling to top (critical on iOS Safari)
+      resetDispatchForm(false, false);
+
       if (isEditing) {
         showBanner('success', `Updated ${d.trackingNumber} for ${d.customerName}.`);
       } else if (res.syncingInBackground && hadPendingImages) {
@@ -2143,10 +2151,11 @@
         showBanner('success', `Saved locally (${d.dispatchId}). Connect Google Sheet in Admin Settings to auto-sync.`);
       }
 
-      resetDispatchForm(false, false);
+      scrollToPageTop();
       loadDispatches();
     } catch (err) {
       showBanner('error', (isEditing ? 'Update failed: ' : 'Save failed: ') + err.message);
+      scrollToPageTop();
       els.submitDispatchBtn.textContent = isEditing ? 'Update Dispatch' : 'Save Dispatch';
     } finally {
       els.submitDispatchBtn.disabled = false;
@@ -3885,9 +3894,45 @@
     openModalDialog(els.lightboxModal);
   }
 
+  let scrollTopFallbackTimer = null;
+
+  function scrollToPageTop() {
+    if (scrollTopFallbackTimer) {
+      clearTimeout(scrollTopFallbackTimer);
+      scrollTopFallbackTimer = null;
+    }
+    if (document.activeElement && typeof document.activeElement.blur === 'function') {
+      document.activeElement.blur();
+    }
+    const headerEl = document.querySelector('.app-header');
+    if (headerEl) headerEl.classList.remove('is-scrolled');
+
+    requestAnimationFrame(() => {
+      try {
+        window.scrollTo({ top: 0, left: 0, behavior: 'smooth' });
+      } catch {
+        window.scrollTo(0, 0);
+      }
+
+      // iOS Safari safety net: if smooth scroll was dropped during layout settle, snap cleanly to top
+      scrollTopFallbackTimer = setTimeout(() => {
+        scrollTopFallbackTimer = null;
+        const currentY = window.scrollY || document.documentElement.scrollTop || document.body.scrollTop || 0;
+        if (currentY > 24) {
+          window.scrollTo(0, 0);
+          document.documentElement.scrollTop = 0;
+          document.body.scrollTop = 0;
+        }
+      }, 500);
+    });
+  }
+
   let bannerAutoHideTimer = null;
   let bannerScrollArmTimer = null;
-  let bannerScrollListener = null;
+  let bannerWheelListener = null;
+  let bannerTouchStartListener = null;
+  let bannerTouchMoveListener = null;
+  let bannerKeydownListener = null;
 
   function hideBanner() {
     if (bannerAutoHideTimer) {
@@ -3898,14 +3943,27 @@
       clearTimeout(bannerScrollArmTimer);
       bannerScrollArmTimer = null;
     }
-    if (bannerScrollListener) {
-      window.removeEventListener('scroll', bannerScrollListener);
-      bannerScrollListener = null;
+    if (bannerWheelListener) {
+      window.removeEventListener('wheel', bannerWheelListener);
+      bannerWheelListener = null;
+    }
+    if (bannerTouchStartListener) {
+      window.removeEventListener('touchstart', bannerTouchStartListener);
+      bannerTouchStartListener = null;
+    }
+    if (bannerTouchMoveListener) {
+      window.removeEventListener('touchmove', bannerTouchMoveListener);
+      bannerTouchMoveListener = null;
+    }
+    if (bannerKeydownListener) {
+      window.removeEventListener('keydown', bannerKeydownListener);
+      bannerKeydownListener = null;
     }
     els.dispatchAlertBanner?.classList.add('hidden');
   }
 
-  function showBanner(type, message) {
+  function showBanner(type, message, options = {}) {
+    const { dismissOnScroll = true, autoHideMs = 7000 } = options;
     hideBanner();
     els.dispatchAlertBanner.className = `alert-banner alert-${type}`;
     els.dispatchAlertBanner.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
@@ -3927,19 +3985,42 @@
     // Auto-dismiss after 7 seconds
     bannerAutoHideTimer = setTimeout(() => {
       hideBanner();
-    }, 7000);
+    }, autoHideMs);
 
-    // Dismiss on any user scroll after smooth scroll-to-top settles
-    bannerScrollArmTimer = setTimeout(() => {
-      const startY = window.scrollY || 0;
-      bannerScrollListener = () => {
-        const curY = window.scrollY || 0;
-        if (Math.abs(curY - startY) > 12) {
-          hideBanner();
-        }
-      };
-      window.addEventListener('scroll', bannerScrollListener, { passive: true });
-    }, 1150);
+    // Dismiss only on real user-initiated scroll (never on programmatic scrollTo or mobile layout shifts)
+    if (dismissOnScroll) {
+      bannerScrollArmTimer = setTimeout(() => {
+        let touchStartY = null;
+
+        bannerWheelListener = (e) => {
+          if (Math.abs(e.deltaY || 0) > 4) hideBanner();
+        };
+        bannerTouchStartListener = (e) => {
+          if (e.touches && e.touches.length > 0) {
+            touchStartY = e.touches[0].clientY;
+          }
+        };
+        bannerTouchMoveListener = (e) => {
+          if (touchStartY !== null && e.touches && e.touches.length > 0) {
+            if (Math.abs(e.touches[0].clientY - touchStartY) > 14) {
+              hideBanner();
+            }
+          }
+        };
+        bannerKeydownListener = (e) => {
+          const tag = (e.target && e.target.tagName) || '';
+          if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+          if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'PageDown' || e.key === 'PageUp' || e.key === ' ') {
+            hideBanner();
+          }
+        };
+
+        window.addEventListener('wheel', bannerWheelListener, { passive: true });
+        window.addEventListener('touchstart', bannerTouchStartListener, { passive: true });
+        window.addEventListener('touchmove', bannerTouchMoveListener, { passive: true });
+        window.addEventListener('keydown', bannerKeydownListener, { passive: true });
+      }, 450);
+    }
   }
 
   function escapeHtml(str) {
