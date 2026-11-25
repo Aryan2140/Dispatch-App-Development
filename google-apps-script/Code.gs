@@ -768,6 +768,39 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
   const totalOrders = summary.totalOrders || 0;
   const totalUnits = summary.totalUnits || 0;
 
+  // Group products by SKU (or name if no SKU) + location so same SKU at same location is totaled,
+  // while the same SKU from different locations remains separate rows.
+  const byLocationMap = {};
+  entries.forEach((e) => {
+    const sku = String(e.sku || '').trim();
+    const name = String(e.name || '').trim();
+    const rawLoc = String(e.location || '').trim();
+    const locDisplay = rawLoc && rawLoc !== '-' ? rawLoc : '-';
+    const locKey = locDisplay.toLowerCase();
+    const prodKey = sku ? 'sku:' + sku.toLowerCase() : 'name:' + name.toLowerCase();
+    const groupKey = prodKey + '::' + locKey;
+
+    if (!byLocationMap[groupKey]) {
+      byLocationMap[groupKey] = {
+        sku: sku,
+        name: name,
+        location: locDisplay,
+        quantity: 0
+      };
+    }
+    byLocationMap[groupKey].quantity += Number(e.quantity) || 0;
+  });
+
+  const productsByLocation = Object.values(byLocationMap).sort((a, b) => {
+    const aUnset = a.location === '-';
+    const bUnset = b.location === '-';
+    if (aUnset !== bUnset) return aUnset ? 1 : -1;
+    const locCmp = a.location.localeCompare(b.location, undefined, { numeric: true, sensitivity: 'base' });
+    if (locCmp !== 0) return locCmp;
+    if (b.quantity !== a.quantity) return b.quantity - a.quantity;
+    return a.name.localeCompare(b.name, undefined, { sensitivity: 'base' });
+  });
+
   const subject = `Aimex Daily Dispatch Summary — ${dateStr} (${totalUnits} units / ${totalOrders} orders)`;
 
   const plainLines = [
@@ -787,6 +820,17 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
   }
   plainLines.push('');
 
+  plainLines.push('PRODUCTS DISPATCHED BY LOCATION (Product | Location | Total Qty):');
+  if (productsByLocation.length === 0) {
+    plainLines.push('  No products packaged today.');
+  } else {
+    productsByLocation.forEach((p) => {
+      const skuPart = p.sku ? `[${p.sku}] ` : '';
+      plainLines.push(`  - ${skuPart}${p.name} | Location: ${p.location} | Total Qty: ${p.quantity}`);
+    });
+  }
+  plainLines.push('');
+
   plainLines.push('PRODUCTS PACKAGED (Time | Product | Quantity | Location):');
 
   if (entries.length === 0) {
@@ -801,6 +845,19 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
   if (sheetUrl) {
     plainLines.push('', `Google Sheet: ${sheetUrl}`);
   }
+
+  const locationSummaryRowsHtml = productsByLocation.length === 0
+    ? '<tr><td colspan="3" style="padding:12px;color:#64748b;text-align:center;">No products packaged today.</td></tr>'
+    : productsByLocation.map((p) => `
+      <tr>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;color:#001e34;">
+          <div style="font-weight:600;">${escapeHtml_(p.name)}</div>
+          ${p.sku ? `<div style="font-size:11px;font-family:monospace;color:#64748b;">${escapeHtml_(p.sku)}</div>` : ''}
+        </td>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;color:#334155;">${escapeHtml_(p.location)}</td>
+        <td style="padding:9px 12px;border-bottom:1px solid #e2e8f0;text-align:right;font-weight:700;color:#001e34;">${p.quantity}</td>
+      </tr>
+    `).join('');
 
   const tableRowsHtml = entries.length === 0
     ? '<tr><td colspan="4" style="padding:12px;color:#64748b;text-align:center;">No products packaged today.</td></tr>'
@@ -846,6 +903,18 @@ function sendSummaryEmail_(adminEmail, dateStr, summary, sheetUrl) {
             </tr>
           </thead>
           <tbody>${courierRowsHtml}</tbody>
+        </table>
+
+        <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Products Dispatched by Location</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;margin-bottom:18px;">
+          <thead>
+            <tr style="background:#f1f5f9;color:#475569;text-align:left;">
+              <th style="padding:8px 12px;">Product</th>
+              <th style="padding:8px 12px;">Location</th>
+              <th style="padding:8px 12px;text-align:right;">Total Qty</th>
+            </tr>
+          </thead>
+          <tbody>${locationSummaryRowsHtml}</tbody>
         </table>
 
         <h3 style="margin:0 0 8px;font-size:14px;color:#001e34;text-transform:uppercase;">Products Packaged</h3>
